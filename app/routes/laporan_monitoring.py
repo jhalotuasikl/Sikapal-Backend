@@ -2,6 +2,8 @@
 from flask import Blueprint, request, jsonify, send_file
 from datetime import datetime, date, timedelta
 from io import BytesIO
+from zoneinfo import ZoneInfo
+import os
 
 from flask_jwt_extended import jwt_required, get_jwt
 from sqlalchemy import func
@@ -20,6 +22,39 @@ from app.models.murid import Murid
 from app.models.kehadiran_murid import KehadiranMurid
 
 monitoring_bp = Blueprint("monitoring", __name__)
+
+
+# =====================================================
+# TIMEZONE HELPER
+# =====================================================
+# Atur zona waktu aplikasi dari .env sesuai lokasi sekolah/instansi.
+# Contoh:
+# APP_TIMEZONE=Asia/Jakarta   -> WIB
+# APP_TIMEZONE=Asia/Makassar  -> WITA
+# APP_TIMEZONE=Asia/Jayapura  -> WIT
+_DEFAULT_APP_TIMEZONE = "Asia/Jakarta"
+
+
+def _app_timezone():
+    tz_name = os.getenv("APP_TIMEZONE", _DEFAULT_APP_TIMEZONE).strip() or _DEFAULT_APP_TIMEZONE
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo(_DEFAULT_APP_TIMEZONE)
+
+
+def _now_app():
+    return datetime.now(_app_timezone())
+
+
+def _now_app_naive():
+    # Database MySQL umumnya menyimpan DATETIME tanpa timezone.
+    # Karena itu timezone lokal aplikasi dibuang sebelum disimpan.
+    return _now_app().replace(tzinfo=None)
+
+
+def _today_app():
+    return _now_app().date()
 
 
 # =====================================================
@@ -42,7 +77,7 @@ def hari_indonesia_lower():
         "Saturday": "sabtu",
         "Sunday": "minggu",
     }
-    return map_hari[datetime.now().strftime("%A")]
+    return map_hari[_now_app().strftime("%A")]
 
 
 def _fmt_time(value):
@@ -126,7 +161,7 @@ def _hapus_monitoring_lebih_14_hari():
     Riwayat monitoring hanya disimpan selama 14 hari.
     Data laporan_monitoring yang lebih lama akan dihapus bersama laporan_mengajar terkait.
     """
-    cutoff = date.today() - timedelta(days=14)
+    cutoff = _today_app() - timedelta(days=14)
 
     old_ids = [
         row[0]
@@ -216,7 +251,7 @@ def _absensi_murid_payload(id_jadwal, tanggal_value=None):
     - Karena itu laporan mengajar membaca semua id_jadwal yang satu kelas + mapel,
       bukan hanya id_jadwal tunggal dari monitoring.
     """
-    tanggal_value = tanggal_value or date.today()
+    tanggal_value = tanggal_value or _today_app()
 
     jadwal, id_jadwal_group = _jadwal_group_ids_absensi(id_jadwal)
 
@@ -365,13 +400,13 @@ def _jadwal_sudah_selesai(jadwal, tanggal_value):
     if not jadwal or not jadwal.jam_selesai or not tanggal_value:
         return False
 
-    today = date.today()
+    today = _today_app()
     if tanggal_value < today:
         return True
     if tanggal_value > today:
         return False
 
-    return datetime.now().time() > jadwal.jam_selesai
+    return _now_app().time() > jadwal.jam_selesai
 
 
 def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None):
@@ -380,7 +415,7 @@ def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None):
     Urutan status yang dipakai hanya: Selesai, Hadir, Alpa, Izin, Belum Absen.
     Patokan alpa bukan lagi hari saja, tapi jam_selesai jadwal.
     """
-    tanggal_value = monitor.tanggal if monitor and monitor.tanggal else date.today()
+    tanggal_value = monitor.tanggal if monitor and monitor.tanggal else _today_app()
 
     if monitor and monitor.jam_keluar:
         return "Selesai"
@@ -402,7 +437,7 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None):
     masuk = None
     keluar = None
     id_monitor = None
-    tanggal_value = date.today()
+    tanggal_value = _today_app()
     id_tingkat, tingkat_text = get_tingkat_info(kelas)
 
     if monitor:
@@ -422,7 +457,7 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None):
     return {
         "id": id_monitor,
         "id_monitor": id_monitor,
-        "tanggal": str(tanggal_value) if tanggal_value else str(date.today()),
+        "tanggal": str(tanggal_value) if tanggal_value else str(_today_app()),
         "id_jadwal": jadwal.id_jadwal,
         "id_tingkat": id_tingkat,
         "tingkat": tingkat_text,
@@ -473,7 +508,7 @@ def _sinkron_kehadiran_guru_terjadwal(rows):
         if not jadwal or not guru:
             continue
 
-        tanggal_value = monitor.tanggal if monitor and monitor.tanggal else date.today()
+        tanggal_value = monitor.tanggal if monitor and monitor.tanggal else _today_app()
         item = _get_kehadiran_guru(guru.id_guru, tanggal_value, jadwal.id_jadwal)
 
         if monitor and monitor.jam_masuk:
@@ -535,7 +570,7 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             .outerjoin(LaporanMengajar, LaporanMengajar.id_monitor == LaporanMonitoring.id_monitor)
         )
 
-        cutoff_riwayat = date.today() - timedelta(days=14)
+        cutoff_riwayat = _today_app() - timedelta(days=14)
         q = q.filter(LaporanMonitoring.tanggal >= cutoff_riwayat)
         q = q.filter(_jadwal_kelas_belum_selesai_expr())
 
@@ -561,7 +596,7 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             Guru.nama_guru.asc()
         ).all()
 
-    today = date.today()
+    today = _today_app()
     hari = hari_indonesia_lower()
 
     return (
@@ -625,7 +660,7 @@ def absen_masuk():
     if _jadwal_kelas_selesai(jadwal):
         return jsonify({"message": "Jadwal sudah selesai dan tidak aktif lagi"}), 400
 
-    today = date.today()
+    today = _today_app()
 
     cek = LaporanMonitoring.query.filter_by(
         id_jadwal=id_jadwal,
@@ -638,7 +673,7 @@ def absen_masuk():
             "id_monitor": cek.id_monitor
         }), 409
 
-    now_time = datetime.now().time()
+    now_time = _now_app().time()
 
     monitor = LaporanMonitoring(
         id_jadwal=id_jadwal,
@@ -751,7 +786,7 @@ def laporan_mengajar():
         laporan.bawa_data_kehadiran = bawa_data_kehadiran
         laporan.daftar_hadir = daftar_hadir if bawa_data_kehadiran else None
         laporan.daftar_tidak_hadir = daftar_tidak_hadir if bawa_data_kehadiran else None
-        laporan.waktu_input = datetime.now()
+        laporan.waktu_input = _now_app_naive()
         message = "Laporan mengajar diperbarui"
         status_code = 200
     else:
@@ -764,7 +799,7 @@ def laporan_mengajar():
             bawa_data_kehadiran=bawa_data_kehadiran,
             daftar_hadir=daftar_hadir if bawa_data_kehadiran else None,
             daftar_tidak_hadir=daftar_tidak_hadir if bawa_data_kehadiran else None,
-            waktu_input=datetime.now()
+            waktu_input=_now_app_naive()
         )
         db.session.add(laporan)
         message = "Laporan mengajar tersimpan"
@@ -822,12 +857,12 @@ def prefill_kehadiran_laporan_mengajar(id_jadwal):
         return jsonify({"message": "Jadwal sudah selesai dan tidak aktif lagi"}), 404
 
     tanggal_text = request.args.get("tanggal")
-    tanggal_value = date.today()
+    tanggal_value = _today_app()
     if tanggal_text:
         try:
             tanggal_value = datetime.strptime(tanggal_text, "%Y-%m-%d").date()
         except Exception:
-            tanggal_value = date.today()
+            tanggal_value = _today_app()
 
     return jsonify(_absensi_murid_payload(id_jadwal, tanggal_value)), 200
 
@@ -864,7 +899,7 @@ def absen_keluar():
             "wajib_laporan": True
         }), 400
 
-    now_time = datetime.now().time()
+    now_time = _now_app().time()
     monitor.jam_keluar = now_time
     monitor.status = "Selesai"
 
@@ -895,7 +930,7 @@ def status_absen(id_jadwal):
     if not jadwal_milik_guru(id_jadwal, id_guru):
         return jsonify({"message": "Jadwal tidak valid"}), 403
 
-    today = date.today()
+    today = _today_app()
     jadwal = Jadwal.query.get_or_404(id_jadwal)
     if _jadwal_kelas_selesai(jadwal):
         return jsonify({"message": "Jadwal sudah selesai dan tidak aktif lagi"}), 404

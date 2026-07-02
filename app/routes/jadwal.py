@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import os
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
@@ -18,6 +19,28 @@ from app.models.tingkat import Tingkat
 from app.models.murid_tingkat import MuridTingkat
 
 jadwal_bp = Blueprint("jadwal", __name__)
+
+
+# =========================
+# helper: timezone aplikasi
+# =========================
+# Atur dari .env:
+# APP_TIMEZONE=Asia/Jakarta   -> WIB
+# APP_TIMEZONE=Asia/Makassar  -> WITA
+# APP_TIMEZONE=Asia/Jayapura  -> WIT
+_DEFAULT_APP_TIMEZONE = "Asia/Jakarta"
+
+
+def _app_timezone():
+    tz_name = os.getenv("APP_TIMEZONE", _DEFAULT_APP_TIMEZONE).strip() or _DEFAULT_APP_TIMEZONE
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo(_DEFAULT_APP_TIMEZONE)
+
+
+def _now_app():
+    return datetime.now(_app_timezone())
 
 
 # =========================
@@ -52,7 +75,7 @@ def normalisasi_hari(value):
 
 
 def hari_ini_indonesia():
-    now_jakarta = datetime.now(ZoneInfo("Asia/Jakarta"))
+    now_app = _now_app()
     map_hari = {
         "monday": "Senin",
         "tuesday": "Selasa",
@@ -62,7 +85,7 @@ def hari_ini_indonesia():
         "saturday": "Sabtu",
         "sunday": "Minggu",
     }
-    return map_hari[now_jakarta.strftime("%A").lower()]
+    return map_hari[now_app.strftime("%A").lower()]
 
 
 def filter_hari(query, hari):
