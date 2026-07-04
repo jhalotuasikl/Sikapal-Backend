@@ -14,3 +14,5 @@ from .jawaban_kuisoner import JawabanKuisoner
 from .detail_jawaban_kuisoner import DetailJawabanKuisoner
 
 
+
+from .periode_akademik import PeriodeAkademik
