@@ -5,3 +5,5 @@ PyMySQL
 python-dotenv
 openpyxl
 tzdata
+Flask-Cors
+gunicorn
