@@ -12,6 +12,7 @@ from app.models.murid import Murid
 from app.models.kelas import Kelas
 from app.models.tingkat import Tingkat
 from app.models.murid_tingkat import MuridTingkat
+from app.models.periode_akademik import PeriodeAkademik
 
 kehadiran_bp = Blueprint("kehadiran", __name__)
 
@@ -59,14 +60,26 @@ def _normalisasi_semester_kehadiran(value, pertemuan=None):
     return "genap" if p is not None and p >= 19 else "ganjil"
 
 
+def _periode_aktif():
+    return PeriodeAkademik.aktif()
+
+
+def _periode_aktif_values():
+    periode = _periode_aktif()
+    if not periode:
+        return None, None, None
+    return periode, periode.semester, periode.tahun_ajaran
+
+
 def _tahun_ajaran_jadwal(jadwal):
     kelas = getattr(jadwal, "kelas", None) or Kelas.query.get(getattr(jadwal, "id_kelas", None))
     return getattr(kelas, "tahun_ajaran", None) or ""
 
 
 def _apply_absensi_semester_tahun_filter(query):
-    semester = request.args.get("semester")
-    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun")
+    periode, semester_aktif, tahun_aktif = _periode_aktif_values()
+    semester = request.args.get("semester") or semester_aktif
+    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun") or tahun_aktif
 
     if semester and str(semester).strip().lower() not in ["all", "ganjilgenap", "1 tahun ajaran", "setahun"]:
         query = query.filter(KehadiranMurid.semester == _normalisasi_semester_kehadiran(semester))
@@ -256,8 +269,9 @@ def input_kehadiran():
     id_murid = data.get("id_murid")
     pertemuan = data.get("pertemuan")
     status = data.get("status") or "Alpa"
-    semester = data.get("semester")
-    tahun_ajaran = data.get("tahun_ajaran") or data.get("tahun")
+    # Semester dan tahun ajaran tidak lagi diinput manual dari frontend.
+    # Backend mengambil snapshot dari periode_akademik yang sedang aktif.
+    periode_aktif, semester, tahun_ajaran = _periode_aktif_values()
     tanggal_in = data.get("tanggal")  # opsional: kalau mau input tanggal manual
 
     if not all([id_jadwal, id_murid, pertemuan]):
@@ -295,10 +309,11 @@ def input_kehadiran():
     if not _jadwal_kelas_aktif(jadwal):
         return jsonify({"message": "Jadwal/kelas sudah selesai"}), 403
 
+    if not periode_aktif:
+        return jsonify({"message": "Periode akademik aktif belum diatur"}), 400
     semester = _normalisasi_semester_kehadiran(semester, pertemuan)
-    tahun_ajaran = tahun_ajaran or _tahun_ajaran_jadwal(jadwal)
     if not tahun_ajaran:
-        return jsonify({"message": "Tahun ajaran tidak ditemukan"}), 400
+        return jsonify({"message": "Tahun ajaran aktif tidak ditemukan"}), 400
 
     id_jadwal_group = _jadwal_group_ids(jadwal)
 
@@ -667,8 +682,8 @@ def admin_terima_absensi():
     id_jadwal = data.get("id_jadwal")
     id_jadwal_list = data.get("id_jadwal_list") or []
     rekap = data.get("rekap", [])
-    semester = data.get("semester") or request.args.get("semester")
-    tahun_ajaran = data.get("tahun_ajaran") or data.get("tahun") or request.args.get("tahun_ajaran") or request.args.get("tahun")
+    # Kirim laporan selalu mengikuti periode akademik aktif.
+    periode_aktif, semester, tahun_ajaran = _periode_aktif_values()
 
     if not id_jadwal:
         return jsonify({"message": "id_jadwal wajib"}), 400
@@ -693,10 +708,9 @@ def admin_terima_absensi():
 
     # Data absensi memang tersimpan saat guru input, tetapi admin hanya boleh
     # melihat data yang sudah diberi tanda status_kirim=True melalui tombol kirim.
-    semester_norm = None
-    if semester and str(semester).strip().lower() not in ["all", "ganjilgenap", "1 tahun ajaran", "setahun"]:
-        semester_norm = _normalisasi_semester_kehadiran(semester)
-    tahun_ajaran = tahun_ajaran or _tahun_ajaran_jadwal(jadwal)
+    if not periode_aktif:
+        return jsonify({"message": "Periode akademik aktif belum diatur"}), 400
+    semester_norm = _normalisasi_semester_kehadiran(semester)
 
     jadwal_group = _jadwal_group_ids(jadwal)
     rows_query = KehadiranMurid.query.filter(KehadiranMurid.id_jadwal.in_(jadwal_group))
@@ -744,7 +758,8 @@ def get_rekap_absensi_admin_by_jadwal(id_jadwal):
     if not _jadwal_kelas_aktif(jadwal):
         return jsonify([]), 200
 
-    semester = request.args.get("semester")
-    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun")
+    _periode, semester_aktif, tahun_aktif = _periode_aktif_values()
+    semester = request.args.get("semester") or semester_aktif
+    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun") or tahun_aktif
 
     return jsonify(_rekap_absensi_mapel(jadwal, id_jadwal_group, only_terkirim=True, semester=semester, tahun_ajaran=tahun_ajaran)), 200

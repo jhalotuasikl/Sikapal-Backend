@@ -13,6 +13,7 @@ from app.models.kelas import Kelas
 from app.models.mata_pelajaran import MataPelajaran
 from app.models.guru import Guru
 from app.models.murid_tingkat import MuridTingkat
+from app.models.periode_akademik import PeriodeAkademik
 
 nilai_bp = Blueprint("nilai", __name__)
 
@@ -60,6 +61,17 @@ def _is_semester_all(value):
     return text in ["", "all", "ganjilgenap", "ganjil genap", "1 tahun ajaran", "setahun"]
 
 
+def _periode_aktif():
+    return PeriodeAkademik.aktif()
+
+
+def _periode_aktif_values():
+    periode = _periode_aktif()
+    if not periode:
+        return None, None, None
+    return periode, periode.semester, periode.tahun_ajaran
+
+
 def _jadwal_satu_mapel_kelas(jadwal):
     if _status_value(jadwal) != "aktif" or _status_value(getattr(jadwal, "kelas", None)) != "aktif":
         return []
@@ -75,8 +87,9 @@ def _jadwal_satu_mapel_kelas(jadwal):
 
 
 def _filter_semester_tahun(query):
-    semester = request.args.get("semester")
-    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun")
+    _periode, semester_aktif, tahun_aktif = _periode_aktif_values()
+    semester = request.args.get("semester") or semester_aktif
+    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun") or tahun_aktif
 
     if semester and not _is_semester_all(semester):
         query = query.filter(Nilai.semester.in_(_semester_filter_values(semester)))
@@ -255,9 +268,13 @@ def input_nilai():
 
     id_jadwal = data.get("id_jadwal")
     id_murid = data.get("id_murid")
-    semester = normalisasi_semester(data.get("semester"))
-    tahun_ajaran = data.get("tahun_ajaran")
+    # Semester dan tahun ajaran tidak lagi diinput manual dari frontend.
+    # Backend mengambil snapshot dari periode_akademik yang sedang aktif.
+    periode_aktif, semester, tahun_ajaran = _periode_aktif_values()
     nilai_angka = data.get("nilai_angka")
+
+    if not periode_aktif:
+        return jsonify({"message": "Periode akademik aktif belum diatur"}), 400
 
     if id_jadwal is None or id_murid is None or not tahun_ajaran or nilai_angka is None:
         return jsonify({"message": "Data tidak lengkap"}), 400
@@ -465,11 +482,8 @@ def edit_nilai(id_nilai):
         nilai.nilai_angka = angka
         nilai.nilai_huruf = konversi_huruf(angka)
 
-    if "semester" in data:
-        nilai.semester = normalisasi_semester(data["semester"])
-
-    if "tahun_ajaran" in data:
-        nilai.tahun_ajaran = data["tahun_ajaran"]
+    # Semester dan tahun ajaran adalah snapshot periode aktif saat nilai dibuat,
+    # jadi tidak diedit manual dari frontend.
 
     # Jika nilai yang sudah terkirim diedit lagi, admin tidak boleh melihat
     # perubahan baru sebelum guru menekan kirim ulang.
@@ -741,9 +755,10 @@ def kirim_semua_nilai_jadwal_ke_admin(id_jadwal):
     if _status_value(jadwal) != "aktif" or _status_value(jadwal.kelas) != "aktif":
         return jsonify({"message": "Jadwal atau kelas sudah arsip, tidak dapat mengirim nilai"}), 400
 
-    req = request.get_json(silent=True) or {}
-    semester = request.args.get("semester") or req.get("semester")
-    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun") or req.get("tahun_ajaran") or req.get("tahun")
+    # Kirim nilai selalu mengikuti periode akademik aktif.
+    periode_aktif, semester, tahun_ajaran = _periode_aktif_values()
+    if not periode_aktif:
+        return jsonify({"message": "Periode akademik aktif belum diatur"}), 400
 
     jadwal_satu_kelompok = _jadwal_satu_mapel_kelas(jadwal)
     nilai_query = Nilai.query.filter(Nilai.id_jadwal.in_(jadwal_satu_kelompok))

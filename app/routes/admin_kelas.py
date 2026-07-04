@@ -7,6 +7,7 @@ from app.models.jadwal import Jadwal
 from app.models.murid_tingkat import MuridTingkat
 from app.models.mata_pelajaran import MataPelajaran
 from app.models.kelas_mapel import kelas_mapel
+from app.models.periode_akademik import PeriodeAkademik
 from app.utils.jadwal_helper import sinkron_jadwal_murid
 from sqlalchemy import select
 
@@ -321,11 +322,15 @@ def tambah_kelas():
 
     data = request.json or {}
     nama_kelas = (data.get("nama_kelas") or "").strip()
-    tahun_ajaran = (data.get("tahun_ajaran") or "").strip()
+    periode_aktif = PeriodeAkademik.aktif()
+    tahun_ajaran = (periode_aktif.tahun_ajaran if periode_aktif else (data.get("tahun_ajaran") or "")).strip()
     id_tingkat = data.get("id_tingkat")
 
+    if not periode_aktif:
+        return jsonify({"message": "Periode akademik aktif belum diatur"}), 400
+
     if not nama_kelas or not tahun_ajaran or not id_tingkat:
-        return jsonify({"message": "Nama kelas, tahun ajaran, dan tingkat wajib diisi"}), 400
+        return jsonify({"message": "Nama kelas, tingkat, dan periode akademik aktif wajib ada"}), 400
 
     tingkat = Tingkat.query.get(id_tingkat)
     if not tingkat:

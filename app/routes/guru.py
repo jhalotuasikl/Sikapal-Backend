@@ -14,6 +14,7 @@ from .kehadiran import (
     _jadwal_group_ids_by_id,
     _jadwal_kelas_aktif,
     _rekap_absensi_mapel,
+    _periode_aktif_values,
 )
 
 guru_bp = Blueprint("guru", __name__)
@@ -118,8 +119,9 @@ def guru_rekap_absensi_by_jadwal(id_jadwal):
     if not _jadwal_kelas_aktif(jadwal):
         return jsonify([]), 200
 
-    semester = request.args.get("semester")
-    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun")
+    _periode, semester_aktif, tahun_aktif = _periode_aktif_values()
+    semester = request.args.get("semester") or semester_aktif
+    tahun_ajaran = request.args.get("tahun_ajaran") or request.args.get("tahun") or tahun_aktif
 
     return jsonify(
         _rekap_absensi_mapel(

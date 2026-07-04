@@ -15,6 +15,7 @@ from .kehadiran import admin_bp
 from .guru import guru_bp
 from .murid import murid_bp
 from .kuisoner import kuisoner_bp
+from .periode_akademik import periode_akademik_bp
 
 def register_routes(app):
 
@@ -47,3 +48,4 @@ def register_routes(app):
     app.register_blueprint(guru_bp, url_prefix='/api')
     app.register_blueprint(murid_bp, url_prefix="/api")
     app.register_blueprint(kuisoner_bp, url_prefix="/api")
+    app.register_blueprint(periode_akademik_bp, url_prefix="/api")
