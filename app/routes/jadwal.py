@@ -605,6 +605,68 @@ def jadwal_hari_ini():
     ]), 200
 
 
+
+
+# =====================================================
+# JADWAL HARI INI (ADMIN) - SEMUA JADWAL AKTIF HARI INI
+# =====================================================
+@jadwal_bp.route("/admin/jadwal-hari-ini", methods=["GET"])
+@jwt_required()
+def jadwal_hari_ini_admin():
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Khusus admin"}), 403
+
+    hari_ini = hari_ini_indonesia()
+
+    data = (
+        db.session.query(Jadwal, Kelas, MataPelajaran, Tingkat)
+        .join(Kelas, Jadwal.id_kelas == Kelas.id_kelas)
+        .join(MataPelajaran, Jadwal.id_mapel == MataPelajaran.id_mapel)
+        .join(Tingkat, Kelas.id_tingkat == Tingkat.id_tingkat)
+        .filter(
+            func.lower(func.trim(Jadwal.hari)) == hari_ini.lower(),
+            _jadwal_kelas_belum_selesai_expr(),
+        )
+        .order_by(Jadwal.jam_mulai.asc(), Kelas.nama_kelas.asc(), MataPelajaran.nama_mapel.asc())
+        .all()
+    )
+
+    result = []
+
+    for j, k, m, t in data:
+        guru_list = []
+        try:
+            guru_list = [jg.guru for jg in j.jadwal_guru] if j.jadwal_guru else []
+        except Exception:
+            guru_list = []
+
+        nama_guru = ", ".join([g.nama_guru for g in guru_list if g]) if guru_list else "-"
+
+        result.append({
+            "id_jadwal": j.id_jadwal,
+            "id_kelas": j.id_kelas,
+            "id_mapel": j.id_mapel,
+            "id_tingkat": t.id_tingkat,
+            "tingkat": t.pangkat,
+            "pangkat": t.pangkat,
+            "hari": label_hari(j.hari),
+            "jam_mulai": j.jam_mulai.strftime("%H:%M") if j.jam_mulai else None,
+            "jam_selesai": j.jam_selesai.strftime("%H:%M") if j.jam_selesai else None,
+            "nama_kelas": k.nama_kelas,
+            "kelas": k.nama_kelas,
+            "tahun_ajaran": k.tahun_ajaran,
+            "tahun": k.tahun_ajaran,
+            "status_kelas": getattr(k, "status", "aktif"),
+            "status_jadwal": getattr(j, "status", "aktif"),
+            "nama_mapel": m.nama_mapel,
+            "mapel": m.nama_mapel,
+            "guru": nama_guru,
+        })
+
+    return jsonify(result), 200
+
+
 # =====================================================
 # JADWAL GURU (SEMUA) - sudah benar (pakai jadwal_guru)
 # =====================================================
