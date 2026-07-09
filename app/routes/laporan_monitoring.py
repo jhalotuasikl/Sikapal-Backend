@@ -1,12 +1,14 @@
 # app/routes/laporan_monitoring.py
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify, send_file, current_app
 from datetime import datetime, date, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 import os
+import uuid
 
 from flask_jwt_extended import jwt_required, get_jwt
 from sqlalchemy import func
+from werkzeug.utils import secure_filename
 from app.extensions import db
 
 from app.models.monitoring import LaporanMonitoring
@@ -335,32 +337,58 @@ def _get_kehadiran_guru(id_guru, tanggal, id_jadwal=None):
     return query.first()
 
 
-def _upsert_kehadiran_guru(id_guru, tanggal, id_jadwal=None, status="Hadir", keterangan=None):
+def _upsert_kehadiran_guru(
+    id_guru,
+    tanggal,
+    id_jadwal=None,
+    status="Hadir",
+    keterangan=None,
+    alasan=None,
+    bukti=None,
+    status_pengajuan=None,
+):
     """
     Rekap kehadiran guru disimpan per jadwal.
-    Jadi kalau guru mengampu 2 mapel pada hari yang sama,
-    masing-masing mapel punya status sendiri: Hadir / Alpa / Izin.
+    Status izin/sakit juga disimpan di tabel yang sama agar admin bisa melihat
+    pengajuan tanpa harus menunggu laporan_monitoring dibuat.
     """
     if not id_guru or not tanggal:
         return None
 
     item = _get_kehadiran_guru(id_guru, tanggal, id_jadwal)
+    next_status = status or (item.status if item else None) or "Hadir"
 
     if item:
-        item.status = status or item.status or "Hadir"
+        item.status = next_status
 
         if keterangan:
             old = (item.keterangan or "").strip()
             if keterangan not in old:
                 item.keterangan = f"{old}; {keterangan}" if old else keterangan
+
+        if alasan is not None:
+            item.alasan = alasan
+        if bukti is not None:
+            item.bukti = bukti
+        if status_pengajuan is not None:
+            item.status_pengajuan = status_pengajuan
+
+        if str(next_status).strip().lower() == "hadir":
+            item.alasan = None
+            item.bukti = None
+            item.status_pengajuan = None
+
         return item
 
     item = KehadiranGuru(
         id_guru=id_guru,
         id_jadwal=id_jadwal,
         tanggal=tanggal,
-        status=status or "Hadir",
-        keterangan=keterangan
+        status=next_status,
+        keterangan=keterangan,
+        alasan=alasan,
+        bukti=bukti,
+        status_pengajuan=status_pengajuan,
     )
     db.session.add(item)
     return item
@@ -381,14 +409,65 @@ def _jadwal_label(id_jadwal):
     jadwal, kelas, mapel = row
     return f"{kelas.nama_kelas} - {mapel.nama_mapel}"
 
+def _allowed_bukti_file(filename):
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return ext in {"jpg", "jpeg", "png", "webp", "pdf"}
+
+
+def _save_bukti_file(file_storage):
+    if not file_storage or not file_storage.filename:
+        return None
+
+    if not _allowed_bukti_file(file_storage.filename):
+        raise ValueError("Format bukti harus jpg, jpeg, png, webp, atau pdf")
+
+    filename = secure_filename(file_storage.filename)
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
+    unique_name = f"{uuid.uuid4().hex}.{ext}"
+
+    upload_dir = os.path.join(current_app.root_path, "static", "uploads", "izin_sakit")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    file_storage.save(os.path.join(upload_dir, unique_name))
+    return f"static/uploads/izin_sakit/{unique_name}"
+
+
+def _bukti_url(path):
+    if not path:
+        return None
+
+    text = str(path).strip()
+    if not text or text.lower() == "none":
+        return None
+
+    if text.startswith("http://") or text.startswith("https://"):
+        return text
+
+    base = request.host_url.rstrip("/") if request else ""
+    return f"{base}/{text.lstrip('/')}"
+
+
+def _add_keterangan(item, text):
+    if not item or not text:
+        return
+    old = (item.keterangan or "").strip()
+    if text not in old:
+        item.keterangan = f"{old}; {text}" if old else text
+
+
+def _pengajuan_value(item):
+    return str(getattr(item, "status_pengajuan", "") or "").strip().lower()
+
 
 def _status_kehadiran_manual(kehadiran_guru):
     if not kehadiran_guru or not kehadiran_guru.status:
         return None
 
     text = str(kehadiran_guru.status).strip().lower()
-    if text in ["izin", "ijin", "sakit"]:
+    if text in ["izin", "ijin"]:
         return "Izin"
+    if text == "sakit":
+        return "Sakit"
     if text in ["alpa", "alpha", "tidak hadir", "tidak_hadir"]:
         return "Alpa"
     if text in ["hadir", "masuk", "selesai"]:
@@ -409,13 +488,13 @@ def _jadwal_sudah_selesai(jadwal, tanggal_value):
     return _now_app().time() > jadwal.jam_selesai
 
 
-def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None):
+def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None, tanggal_override=None):
     """
     Status final yang dipakai admin monitoring.
     Urutan status yang dipakai hanya: Selesai, Hadir, Alpa, Izin, Belum Absen.
     Patokan alpa bukan lagi hari saja, tapi jam_selesai jadwal.
     """
-    tanggal_value = monitor.tanggal if monitor and monitor.tanggal else _today_app()
+    tanggal_value = tanggal_override or (monitor.tanggal if monitor and monitor.tanggal else _today_app())
 
     if monitor and monitor.jam_keluar:
         return "Selesai"
@@ -423,9 +502,21 @@ def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None):
     if monitor and monitor.jam_masuk:
         return "Hadir"
 
+    pengajuan = _pengajuan_value(kehadiran_guru)
     manual = _status_kehadiran_manual(kehadiran_guru)
-    if manual in ["Izin", "Alpa", "Hadir"]:
+
+    if manual in ["Izin", "Sakit"]:
+        if pengajuan == "ditolak":
+            return "Alpa" if _jadwal_sudah_selesai(jadwal, tanggal_value) else "Belum Absen"
         return manual
+
+    if manual == "Alpa":
+        if pengajuan == "ditolak" and not _jadwal_sudah_selesai(jadwal, tanggal_value):
+            return "Belum Absen"
+        return "Alpa"
+
+    if manual == "Hadir":
+        return "Hadir"
 
     if _jadwal_sudah_selesai(jadwal, tanggal_value):
         return "Alpa"
@@ -433,12 +524,15 @@ def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None):
     return "Belum Absen"
 
 
-def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None):
+def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None, kehadiran_guru=None, tanggal_override=None):
     masuk = None
     keluar = None
     id_monitor = None
     tanggal_value = _today_app()
     id_tingkat, tingkat_text = get_tingkat_info(kelas)
+
+    if tanggal_override is not None:
+        tanggal_value = tanggal_override
 
     if monitor:
         id_monitor = monitor.id_monitor
@@ -446,13 +540,14 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None):
         masuk = _fmt_time(monitor.jam_masuk)
         keluar = _fmt_time(monitor.jam_keluar)
 
-    kehadiran_guru = _get_kehadiran_guru(
-        guru.id_guru if guru else None,
-        tanggal_value,
-        jadwal.id_jadwal if jadwal else None
-    )
+    if kehadiran_guru is None:
+        kehadiran_guru = _get_kehadiran_guru(
+            guru.id_guru if guru else None,
+            tanggal_value,
+            jadwal.id_jadwal if jadwal else None
+        )
 
-    status = _status_monitoring(jadwal, monitor, laporan, kehadiran_guru)
+    status = _status_monitoring(jadwal, monitor, laporan, kehadiran_guru, tanggal_override=tanggal_value)
 
     return {
         "id": id_monitor,
@@ -481,6 +576,10 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None):
         "id_kehadiran_guru": kehadiran_guru.id_kehadiran if kehadiran_guru else None,
         "kehadiran_guru": kehadiran_guru.status if kehadiran_guru else None,
         "keterangan_kehadiran": kehadiran_guru.keterangan if kehadiran_guru else None,
+        "alasan": getattr(kehadiran_guru, "alasan", None) if kehadiran_guru else None,
+        "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
+        "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
+        "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
 
         "sudah_laporan": laporan is not None,
         "laporan_mengajar": _laporan_payload(laporan),
@@ -496,6 +595,30 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None):
     }
 
 
+def _unpack_monitoring_row(row):
+    if len(row) >= 7:
+        jadwal, kelas, mapel, guru, monitor, laporan, kehadiran = row[:7]
+        return jadwal, kelas, mapel, guru, monitor, laporan, kehadiran
+
+    jadwal, kelas, mapel, guru, monitor, laporan = row
+    return jadwal, kelas, mapel, guru, monitor, laporan, None
+
+
+def _monitoring_payload_from_row(row):
+    jadwal, kelas, mapel, guru, monitor, laporan, kehadiran = _unpack_monitoring_row(row)
+    tanggal_override = getattr(kehadiran, "tanggal", None) if kehadiran and not monitor else None
+    return _monitoring_payload(
+        jadwal,
+        kelas,
+        mapel,
+        guru,
+        monitor,
+        laporan,
+        kehadiran_guru=kehadiran,
+        tanggal_override=tanggal_override,
+    )
+
+
 def _sinkron_kehadiran_guru_terjadwal(rows):
     """
     Pastikan data kehadiran_guru tersimpan per jadwal/mapel.
@@ -504,12 +627,13 @@ def _sinkron_kehadiran_guru_terjadwal(rows):
     """
     changed = False
 
-    for jadwal, kelas, mapel, guru, monitor, laporan in rows:
+    for row in rows:
+        jadwal, kelas, mapel, guru, monitor, laporan, kehadiran_row = _unpack_monitoring_row(row)
         if not jadwal or not guru:
             continue
 
         tanggal_value = monitor.tanggal if monitor and monitor.tanggal else _today_app()
-        item = _get_kehadiran_guru(guru.id_guru, tanggal_value, jadwal.id_jadwal)
+        item = kehadiran_row or _get_kehadiran_guru(guru.id_guru, tanggal_value, jadwal.id_jadwal)
 
         if monitor and monitor.jam_masuk:
             desired_status = "Hadir"
@@ -540,8 +664,12 @@ def _sinkron_kehadiran_guru_terjadwal(rows):
             item.keterangan = f"{old}; {ket}" if old and ket not in old else (old or ket)
             changed = True
 
-        # Auto alpa tidak menimpa status manual izin/sakit/hadir.
-        if desired_status == "Alpa" and current in ["", "belum absen", "belum_absen"]:
+        # Auto alpa tidak menimpa izin/sakit yang sudah disetujui.
+        # Jika pengajuan ditolak dan jadwal sudah lewat, baru berubah menjadi Alpa.
+        if desired_status == "Alpa" and (
+            current in ["", "belum absen", "belum_absen"]
+            or _pengajuan_value(item) == "ditolak"
+        ):
             item.status = "Alpa"
             old = (item.keterangan or "").strip()
             item.keterangan = f"{old}; {ket}" if old and ket not in old else (old or ket)
@@ -560,24 +688,32 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
                 MataPelajaran,
                 Guru,
                 LaporanMonitoring,
-                LaporanMengajar
+                LaporanMengajar,
+                KehadiranGuru,
             )
-            .join(Jadwal, Jadwal.id_jadwal == LaporanMonitoring.id_jadwal)
-            .join(JadwalGuru, JadwalGuru.id_jadwal == Jadwal.id_jadwal)
-            .join(Guru, Guru.id_guru == JadwalGuru.id_guru)
+            .join(Jadwal, Jadwal.id_jadwal == KehadiranGuru.id_jadwal)
+            .join(Guru, Guru.id_guru == KehadiranGuru.id_guru)
             .join(Kelas, Kelas.id_kelas == Jadwal.id_kelas)
             .join(MataPelajaran, MataPelajaran.id_mapel == Jadwal.id_mapel)
+            .outerjoin(
+                LaporanMonitoring,
+                db.and_(
+                    LaporanMonitoring.id_jadwal == KehadiranGuru.id_jadwal,
+                    LaporanMonitoring.tanggal == KehadiranGuru.tanggal,
+                ),
+            )
             .outerjoin(LaporanMengajar, LaporanMengajar.id_monitor == LaporanMonitoring.id_monitor)
         )
 
         cutoff_riwayat = _today_app() - timedelta(days=14)
-        q = q.filter(LaporanMonitoring.tanggal >= cutoff_riwayat)
+        q = q.filter(KehadiranGuru.tanggal >= cutoff_riwayat)
         q = q.filter(_jadwal_kelas_belum_selesai_expr())
+        q = q.filter(KehadiranGuru.status.in_(["Hadir", "Izin", "Sakit", "Alpa"]))
 
         if tanggal_from:
             try:
                 q = q.filter(
-                    LaporanMonitoring.tanggal >= datetime.strptime(tanggal_from, "%Y-%m-%d").date()
+                    KehadiranGuru.tanggal >= datetime.strptime(tanggal_from, "%Y-%m-%d").date()
                 )
             except Exception:
                 pass
@@ -585,15 +721,15 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
         if tanggal_to:
             try:
                 q = q.filter(
-                    LaporanMonitoring.tanggal <= datetime.strptime(tanggal_to, "%Y-%m-%d").date()
+                    KehadiranGuru.tanggal <= datetime.strptime(tanggal_to, "%Y-%m-%d").date()
                 )
             except Exception:
                 pass
 
         return q.order_by(
-            LaporanMonitoring.tanggal.desc(),
+            KehadiranGuru.tanggal.desc(),
             Jadwal.jam_mulai.desc(),
-            Guru.nama_guru.asc()
+            Guru.nama_guru.asc(),
         ).all()
 
     today = _today_app()
@@ -703,6 +839,74 @@ def absen_masuk():
 # =====================================================
 # LAPORAN MENGAJAR WAJIB SEBELUM ABSEN KELUAR
 # =====================================================
+@monitoring_bp.route("/guru/pengajuan-kehadiran", methods=["POST"])
+@jwt_required()
+def pengajuan_kehadiran_guru():
+    claims = get_jwt()
+    if claims.get("role") != "guru":
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    id_guru = claims.get("id_guru")
+    payload_json = request.get_json(silent=True) or {}
+    id_jadwal = request.form.get("id_jadwal") or payload_json.get("id_jadwal")
+    status = request.form.get("status") or payload_json.get("status")
+    alasan = request.form.get("alasan") or payload_json.get("alasan")
+
+    try:
+        id_jadwal = int(id_jadwal)
+    except Exception:
+        return jsonify({"message": "id_jadwal wajib dan harus valid"}), 400
+
+    status_text = str(status or "").strip().capitalize()
+    if status_text not in ["Izin", "Sakit"]:
+        return jsonify({"message": "Status pengajuan harus Izin atau Sakit"}), 400
+
+    alasan_text = str(alasan or "").strip()
+    if len(alasan_text) < 3:
+        return jsonify({"message": "Alasan izin/sakit wajib diisi"}), 400
+
+    if not jadwal_milik_guru(id_jadwal, int(id_guru)):
+        return jsonify({"message": "Jadwal tidak valid"}), 403
+
+    jadwal = Jadwal.query.get_or_404(id_jadwal)
+    if _jadwal_kelas_selesai(jadwal):
+        return jsonify({"message": "Jadwal sudah selesai dan tidak aktif lagi"}), 400
+
+    today = _today_app()
+    monitor = LaporanMonitoring.query.filter_by(id_jadwal=id_jadwal, tanggal=today).first()
+    if monitor and monitor.jam_masuk:
+        return jsonify({"message": "Anda sudah absen masuk pada jadwal ini"}), 409
+
+    bukti_path = None
+    try:
+        bukti_path = _save_bukti_file(request.files.get("bukti"))
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+
+    item = _upsert_kehadiran_guru(
+        id_guru=id_guru,
+        tanggal=today,
+        id_jadwal=id_jadwal,
+        status=status_text,
+        keterangan=f"Pengajuan {status_text} - {_jadwal_label(id_jadwal)}",
+        alasan=alasan_text,
+        bukti=bukti_path,
+        status_pengajuan="Menunggu",
+    )
+
+    db.session.commit()
+
+    return jsonify({
+        "message": f"Pengajuan {status_text.lower()} berhasil dikirim",
+        "id_kehadiran_guru": item.id_kehadiran,
+        "status": item.status,
+        "alasan": item.alasan,
+        "bukti": item.bukti,
+        "bukti_url": _bukti_url(item.bukti),
+        "status_pengajuan": item.status_pengajuan,
+    }), 201
+
+
 @monitoring_bp.route("/guru/laporan-mengajar", methods=["POST"])
 @jwt_required()
 def laporan_mengajar():
@@ -957,9 +1161,15 @@ def status_absen(id_jadwal):
             )
             db.session.commit()
 
+        kehadiran_guru = _get_kehadiran_guru(id_guru, today, id_jadwal)
         return jsonify({
             "status": status_ui.lower().replace(" ", "_"),
             "status_label": status_ui,
+            "id_kehadiran_guru": kehadiran_guru.id_kehadiran if kehadiran_guru else None,
+            "alasan": getattr(kehadiran_guru, "alasan", None) if kehadiran_guru else None,
+            "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
+            "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
+            "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
             "sudah_laporan": False,
             "laporan_mengajar": None
         }), 200
@@ -978,8 +1188,57 @@ def status_absen(id_jadwal):
         "status": status_key,
         "status_label": status_ui,
         "id_monitor": data.id_monitor,
+        "id_kehadiran_guru": kehadiran_guru.id_kehadiran if kehadiran_guru else None,
+        "alasan": getattr(kehadiran_guru, "alasan", None) if kehadiran_guru else None,
+        "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
+        "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
+        "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
         "sudah_laporan": laporan is not None,
         "laporan_mengajar": _laporan_payload(laporan)
+    }), 200
+
+
+@monitoring_bp.route("/admin/kehadiran-guru/<int:id_kehadiran>/pengajuan", methods=["POST"])
+@jwt_required()
+def proses_pengajuan_kehadiran_guru(id_kehadiran):
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    data = request.json or {}
+    aksi = str(data.get("aksi") or data.get("action") or "").strip().lower()
+    if aksi not in ["setujui", "approve", "disetujui", "tolak", "reject", "ditolak"]:
+        return jsonify({"message": "Aksi harus setujui atau tolak"}), 400
+
+    item = KehadiranGuru.query.get_or_404(id_kehadiran)
+    status_manual = _status_kehadiran_manual(item)
+    if status_manual not in ["Izin", "Sakit"]:
+        return jsonify({"message": "Data ini bukan pengajuan izin/sakit"}), 400
+
+    jadwal = Jadwal.query.get(item.id_jadwal)
+
+    if aksi in ["setujui", "approve", "disetujui"]:
+        item.status_pengajuan = "Disetujui"
+        _add_keterangan(item, f"Pengajuan {status_manual} disetujui admin")
+        message = f"Pengajuan {status_manual.lower()} disetujui"
+    else:
+        item.status_pengajuan = "Ditolak"
+        _add_keterangan(item, f"Pengajuan {status_manual} ditolak admin")
+        if _jadwal_sudah_selesai(jadwal, item.tanggal):
+            item.status = "Alpa"
+            _add_keterangan(item, "Menjadi Alpa karena jadwal sudah selesai")
+        message = f"Pengajuan {status_manual.lower()} ditolak"
+
+    db.session.commit()
+
+    return jsonify({
+        "message": message,
+        "id_kehadiran_guru": item.id_kehadiran,
+        "status": item.status,
+        "status_pengajuan": item.status_pengajuan,
+        "alasan": item.alasan,
+        "bukti": item.bukti,
+        "bukti_url": _bukti_url(item.bukti),
     }), 200
 
 
@@ -1004,8 +1263,8 @@ def monitoring_admin():
     _sinkron_kehadiran_guru_terjadwal(data)
 
     return jsonify([
-        _monitoring_payload(j, k, m, g, monitor, laporan)
-        for j, k, m, g, monitor, laporan in data
+        _monitoring_payload_from_row(row)
+        for row in data
     ]), 200
 
 
@@ -1023,6 +1282,8 @@ def _kehadiran_excel(payload):
         return "Hadir"
     if status == "izin":
         return "Izin"
+    if status == "sakit":
+        return "Sakit"
     if status == "alpa":
         return "Alpa"
 
@@ -1031,8 +1292,10 @@ def _kehadiran_excel(payload):
         text = str(raw_kehadiran).strip().lower()
         if text in ["hadir", "masuk", "selesai"]:
             return "Hadir"
-        if text in ["izin", "ijin", "sakit"]:
+        if text in ["izin", "ijin"]:
             return "Izin"
+        if text == "sakit":
+            return "Sakit"
         if text in ["alpa", "alpha", "tidak hadir", "tidak_hadir"]:
             return "Alpa"
 
@@ -1102,8 +1365,8 @@ def export_monitoring_admin():
         cell.fill = PatternFill("solid", fgColor="0A6AA1")
         cell.alignment = Alignment(horizontal="center")
 
-    for jadwal, kelas, mapel, guru, monitor, laporan in data:
-        payload = _monitoring_payload(jadwal, kelas, mapel, guru, monitor, laporan)
+    for row in data:
+        payload = _monitoring_payload_from_row(row)
         laporan_payload = payload.get("laporan_mengajar") or {}
         ws.append([
             _safe_sheet_value(payload.get("nip")),

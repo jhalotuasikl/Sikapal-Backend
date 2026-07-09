@@ -73,6 +73,11 @@ def get_mapel_murid():
         kelas = getattr(j, "kelas", None)
         mapel = getattr(j, "mapel", None)
         tingkat = getattr(kelas, "tingkat", None) if kelas else None
+        try:
+            guru_list = [jg.guru for jg in j.jadwal_guru] if j.jadwal_guru else []
+        except Exception:
+            guru_list = []
+        nama_guru = ", ".join([g.nama_guru for g in guru_list if g]) if guru_list else "-"
 
         result.append({
             "id_jadwal": j.id_jadwal,
@@ -92,6 +97,8 @@ def get_mapel_murid():
             "jam_selesai": j.jam_selesai.strftime("%H:%M") if j.jam_selesai else None,
             "status": getattr(j, "status", None),
             "status_jadwal": getattr(j, "status", None),
+            "guru": nama_guru,
+            "nama_guru": nama_guru,
         })
 
     return jsonify(result), 200
