@@ -30,6 +30,9 @@ class KehadiranGuru(db.Model):
     tanggal = db.Column(db.Date, nullable=False, default=date.today)
     status = db.Column(db.String(30), nullable=False, default="Hadir")
     keterangan = db.Column(db.String(255), nullable=True)
+    alasan = db.Column(db.Text, nullable=True)
+    bukti = db.Column(db.String(255), nullable=True)
+    status_pengajuan = db.Column(db.String(30), nullable=True)
 
     guru = db.relationship(
         "Guru",
@@ -49,4 +52,7 @@ class KehadiranGuru(db.Model):
             "tanggal": str(self.tanggal) if self.tanggal else None,
             "status": self.status,
             "keterangan": self.keterangan,
+            "alasan": self.alasan,
+            "bukti": self.bukti,
+            "status_pengajuan": self.status_pengajuan,
         }
