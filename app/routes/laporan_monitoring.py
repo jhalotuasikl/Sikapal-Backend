@@ -760,7 +760,7 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             func.lower(func.trim(Jadwal.hari)) == hari.lower(),
             _jadwal_kelas_belum_selesai_expr(),
         )
-        .order_by(Jadwal.jam_mulai.asc(), Guru.nama_guru.asc())
+        .order_by(Jadwal.jam_mulai.desc(), Guru.nama_guru.asc())
         .all()
     )
 
@@ -876,6 +876,32 @@ def pengajuan_kehadiran_guru():
     monitor = LaporanMonitoring.query.filter_by(id_jadwal=id_jadwal, tanggal=today).first()
     if monitor and monitor.jam_masuk:
         return jsonify({"message": "Anda sudah absen masuk pada jadwal ini"}), 409
+
+    kehadiran_sekarang = _get_kehadiran_guru(id_guru, today, id_jadwal)
+    pengajuan_sekarang = _pengajuan_value(kehadiran_sekarang)
+    status_sekarang = _status_kehadiran_manual(kehadiran_sekarang)
+    if (
+        status_sekarang in ["Izin", "Sakit"]
+        and pengajuan_sekarang in ["menunggu", "disetujui"]
+    ):
+        return jsonify({
+            "message": "Pengajuan izin/sakit untuk jadwal ini sudah ada"
+        }), 409
+
+    if _jadwal_sudah_selesai(jadwal, today):
+        item = _upsert_kehadiran_guru(
+            id_guru=id_guru,
+            tanggal=today,
+            id_jadwal=id_jadwal,
+            status="Alpa",
+            keterangan=f"Pengajuan ditolak otomatis karena jadwal sudah selesai - {_jadwal_label(id_jadwal)}",
+        )
+        db.session.commit()
+        return jsonify({
+            "message": "Waktu jadwal sudah lewat. Pengajuan izin/sakit dikunci dan status menjadi Alpa",
+            "id_kehadiran_guru": item.id_kehadiran if item else None,
+            "status": "Alpa",
+        }), 409
 
     bukti_path = None
     try:
