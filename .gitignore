@@ -1,0 +1,12 @@
+
+# Production environment
+.env
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# User-uploaded production files
+app/static/uploads/
+app/static/profile_photos/
