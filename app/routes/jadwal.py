@@ -17,6 +17,13 @@ from app.models.guru import Guru
 from app.models.murid import Murid
 from app.models.tingkat import Tingkat
 from app.models.murid_tingkat import MuridTingkat
+from app.models.kehadiran_murid import KehadiranMurid
+from app.models.kehadiran_guru import KehadiranGuru
+from app.models.nilai import Nilai
+from app.models.monitoring import LaporanMonitoring
+from app.models.kuisoner import Kuisoner
+from app.models.murid_mapel import MuridMapel
+from app.models.kelas_mapel import kelas_mapel
 
 jadwal_bp = Blueprint("jadwal", __name__)
 
@@ -1104,7 +1111,9 @@ def admin_update_jadwal(id_jadwal):
 # =====================================================
 # ADMIN: HAPUS JADWAL
 # Endpoint: DELETE /api/admin/jadwal/<id_jadwal>
-# Catatan: hapus jadwal, bukan mapel.
+# - Data absensi, nilai, monitoring, kuisoner, dan assignment ikut dihapus.
+# - Relasi mapel-kelas hanya dilepas jika tidak ada jadwal aktif lain untuk
+#   mapel yang sama pada kelas tersebut.
 # =====================================================
 @jadwal_bp.route("/admin/jadwal/<int:id_jadwal>", methods=["DELETE"])
 @jwt_required()
@@ -1115,27 +1124,106 @@ def admin_delete_jadwal(id_jadwal):
         return jsonify({"message": "Hanya admin"}), 403
 
     jadwal = Jadwal.query.get_or_404(id_jadwal)
+    id_kelas = jadwal.id_kelas
+    id_mapel = jadwal.id_mapel
 
     try:
-        deleted_guru = JadwalGuru.query.filter_by(id_jadwal=id_jadwal).delete(synchronize_session=False)
+        jumlah_jadwal_aktif_lain = Jadwal.query.filter(
+            Jadwal.id_kelas == id_kelas,
+            Jadwal.id_mapel == id_mapel,
+            Jadwal.id_jadwal != id_jadwal,
+            Jadwal.status == "aktif",
+        ).count()
 
-        db.session.execute(
+        deleted_kehadiran_murid = KehadiranMurid.query.filter_by(
+            id_jadwal=id_jadwal
+        ).delete(synchronize_session=False)
+        deleted_nilai = Nilai.query.filter_by(
+            id_jadwal=id_jadwal
+        ).delete(synchronize_session=False)
+        deleted_kehadiran_guru = KehadiranGuru.query.filter_by(
+            id_jadwal=id_jadwal
+        ).delete(synchronize_session=False)
+        deleted_monitoring = LaporanMonitoring.query.filter_by(
+            id_jadwal=id_jadwal
+        ).delete(synchronize_session=False)
+
+        kuisoner_rows = Kuisoner.query.filter_by(id_jadwal=id_jadwal).all()
+        deleted_kuisoner = len(kuisoner_rows)
+        for kuisoner in kuisoner_rows:
+            db.session.delete(kuisoner)
+
+        deleted_guru = JadwalGuru.query.filter_by(
+            id_jadwal=id_jadwal
+        ).delete(synchronize_session=False)
+
+        deleted_murid = db.session.execute(
             jadwal_murid.delete().where(jadwal_murid.c.id_jadwal == id_jadwal)
-        )
+        ).rowcount or 0
+
+        mapel_dihapus_dari_kelas = jumlah_jadwal_aktif_lain == 0
+        deleted_murid_mapel = 0
+
+        if mapel_dihapus_dari_kelas and id_kelas and id_mapel:
+            db.session.execute(
+                kelas_mapel.delete().where(
+                    kelas_mapel.c.id_kelas == id_kelas,
+                    kelas_mapel.c.id_mapel == id_mapel,
+                )
+            )
+
+            murid_ids = {
+                row[0]
+                for row in db.session.query(MuridTingkat.id_murid).filter(
+                    MuridTingkat.id_kelas == id_kelas,
+                    func.lower(func.trim(MuridTingkat.status)).in_(["aktif", "tinggal_kelas"]),
+                ).all()
+            }
+            murid_ids.update(
+                row[0]
+                for row in db.session.query(Murid.id_murid).filter(
+                    Murid.id_kelas == id_kelas,
+                ).all()
+            )
+
+            if murid_ids:
+                deleted_murid_mapel = MuridMapel.query.filter(
+                    MuridMapel.id_mapel == id_mapel,
+                    MuridMapel.id_murid.in_(murid_ids),
+                ).delete(synchronize_session=False)
 
         db.session.delete(jadwal)
         db.session.commit()
 
+        if mapel_dihapus_dari_kelas:
+            message = "Jadwal terakhir dan mata pelajaran berhasil dihapus dari kelas"
+        else:
+            message = "Jadwal berhasil dihapus; mata pelajaran tetap tersedia karena masih memiliki jadwal lain"
+
         return jsonify({
-            "message": "Jadwal berhasil dihapus",
+            "message": message,
             "id_jadwal": id_jadwal,
-            "jumlah_relasi_guru_dihapus": deleted_guru,
+            "id_kelas": id_kelas,
+            "id_mapel": id_mapel,
+            "mapel_dihapus_dari_kelas": mapel_dihapus_dari_kelas,
+            "sisa_jadwal_aktif_mapel": jumlah_jadwal_aktif_lain,
+            "data_terhapus": {
+                "kehadiran_murid": deleted_kehadiran_murid,
+                "nilai_murid": deleted_nilai,
+                "kehadiran_guru": deleted_kehadiran_guru,
+                "monitoring": deleted_monitoring,
+                "kuisoner": deleted_kuisoner,
+                "assignment_guru": deleted_guru,
+                "assignment_murid": deleted_murid,
+                "murid_mapel": deleted_murid_mapel,
+            },
         }), 200
 
-    except IntegrityError:
+    except IntegrityError as e:
         db.session.rollback()
         return jsonify({
-            "message": "Jadwal tidak bisa dihapus karena sudah dipakai pada data lain seperti absensi, nilai, atau monitoring. Nonaktifkan/arsipkan data terkait terlebih dahulu.",
+            "message": "Jadwal tidak dapat dihapus karena masih memiliki relasi data yang belum berhasil dibersihkan.",
+            "error": str(e),
         }), 409
     except Exception as e:
         db.session.rollback()

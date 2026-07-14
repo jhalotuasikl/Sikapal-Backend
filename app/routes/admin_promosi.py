@@ -71,27 +71,49 @@ def _sync_mapel_dan_jadwal(murid, kelas_baru):
 
 
 
-def _arsipkan_kelas_jika_tidak_ada_murid_aktif(id_kelas):
+def _arsipkan_pembelajaran_kelas_lama(id_kelas):
+    """Arsipkan pembelajaran lama setelah proses promosi.
+
+    Jadwal lama selalu diselesaikan agar mapel/jadwal periode sebelumnya tidak
+    tampil lagi pada halaman aktif. Kelas hanya ikut diselesaikan ketika sudah
+    tidak memiliki murid aktif/tinggal kelas atau murid yang masih terdaftar.
+    Jika masih ada murid yang tidak dipromosikan,
+    kelas tetap aktif sebagai kelas tinggal kelas dan siap diberi jadwal baru.
+    """
     if not id_kelas:
-        return
+        return {"kelas_selesai": False, "masih_ada_murid_aktif": False}
 
     kelas = Kelas.query.get(id_kelas)
     if not kelas:
-        return
+        return {"kelas_selesai": False, "masih_ada_murid_aktif": False}
+
+    Jadwal.query.filter_by(id_kelas=id_kelas).update(
+        {"status": "selesai"},
+        synchronize_session=False,
+    )
 
     masih_aktif = MuridTingkat.query.filter(
         MuridTingkat.id_kelas == id_kelas,
-        func.lower(func.trim(MuridTingkat.status)) == "aktif",
+        func.lower(func.trim(MuridTingkat.status)).in_(["aktif", "tinggal_kelas"]),
     ).first()
 
-    if masih_aktif:
-        return
+    # Murid yang tidak dipilih pada proses promosi tetap memiliki id_kelas lama.
+    # Pemeriksaan langsung ini menjaga kelas tetap aktif juga pada data lama yang
+    # belum memiliki riwayat MuridTingkat yang lengkap.
+    masih_terdaftar_di_kelas = Murid.query.filter_by(id_kelas=id_kelas).first()
+
+    if masih_aktif or masih_terdaftar_di_kelas:
+        if hasattr(kelas, "status"):
+            kelas.status = "aktif"
+        return {
+            "kelas_selesai": False,
+            "masih_ada_murid_aktif": True,
+        }
 
     if hasattr(kelas, "status"):
         kelas.status = "selesai"
 
-    # Semua jadwal di kelas lama ikut masuk arsip agar tidak muncul di dropdown aktif.
-    Jadwal.query.filter_by(id_kelas=id_kelas).update({"status": "selesai"})
+    return {"kelas_selesai": True, "masih_ada_murid_aktif": False}
 
 def _murid_payload(murid, mt=None):
     kelas = murid.kelas
@@ -358,9 +380,13 @@ def naik_kelas():
                 **sync_info,
             })
 
-        # Jika semua murid aktif pada kelas lama sudah selesai/promosi, kelas lama dan jadwalnya masuk arsip.
+        hasil_arsip = []
         for id_kelas_lama in kelas_lama_terdampak:
-            _arsipkan_kelas_jika_tidak_ada_murid_aktif(id_kelas_lama)
+            status_arsip = _arsipkan_pembelajaran_kelas_lama(id_kelas_lama)
+            hasil_arsip.append({
+                "id_kelas": id_kelas_lama,
+                **status_arsip,
+            })
 
         db.session.commit()
 
@@ -372,6 +398,7 @@ def naik_kelas():
             "data_berhasil": berhasil,
             "detail_gagal": gagal,
             "peringatan": peringatan,
+            "hasil_arsip_kelas_lama": hasil_arsip,
         }), 200
 
     except Exception as e:

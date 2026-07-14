@@ -189,6 +189,10 @@ def _kelas_payload(k, include_detail=False, include_selesai_detail=False):
         },
     }
 
+    # Selalu kirim jumlah murid aktif agar card daftar kelas tidak perlu
+    # melakukan request detail satu per satu.
+    payload["jumlah_murid"] = len(_murid_aktif_kelas_payload(k))
+
     if include_detail:
         jadwal_query = Jadwal.query.filter_by(id_kelas=k.id_kelas)
 
