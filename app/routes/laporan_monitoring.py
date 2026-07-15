@@ -22,6 +22,7 @@ from app.models.mata_pelajaran import MataPelajaran
 from app.models.guru import Guru
 from app.models.murid import Murid
 from app.models.kehadiran_murid import KehadiranMurid
+from app.models.periode_akademik import PeriodeAkademik
 
 monitoring_bp = Blueprint("monitoring", __name__)
 
@@ -242,54 +243,113 @@ def _jadwal_group_ids_absensi(id_jadwal):
     return jadwal, ids or [id_jadwal]
 
 
-def _absensi_murid_payload(id_jadwal, tanggal_value=None):
-    """
-    Ambil data absen murid yang sudah diinput guru pada hari/tanggal tersebut.
+def _periode_absensi_aktif_values():
+    periode = PeriodeAkademik.aktif()
+    if not periode:
+        return None, None
+    return periode.semester, periode.tahun_ajaran
 
-    Versi ini sudah menyesuaikan logika jadwal terbaru:
-    - Laporan monitoring tetap memakai id_jadwal hari itu.
-    - Data input kehadiran bisa tersimpan pada salah satu jadwal dalam grup mapel
-      yang sama, misalnya J1/J2/J3.
-    - Karena itu laporan mengajar membaca semua id_jadwal yang satu kelas + mapel,
-      bukan hanya id_jadwal tunggal dari monitoring.
-    """
-    tanggal_value = tanggal_value or _today_app()
 
+def _absensi_murid_query(id_jadwal_group, pertemuan=None):
+    """
+    Query data kehadiran pada grup jadwal mapel yang sama.
+
+    Data difilter memakai periode akademik aktif agar pertemuan lama dari
+    tahun ajaran/semester sebelumnya tidak ikut ditampilkan pada laporan.
+    """
+    query = (
+        db.session.query(KehadiranMurid, Murid)
+        .join(Murid, Murid.id_murid == KehadiranMurid.id_murid)
+        .filter(KehadiranMurid.id_jadwal.in_(id_jadwal_group))
+    )
+
+    semester, tahun_ajaran = _periode_absensi_aktif_values()
+    if semester:
+        query = query.filter(KehadiranMurid.semester == semester)
+    if tahun_ajaran:
+        query = query.filter(KehadiranMurid.tahun_ajaran == tahun_ajaran)
+    if pertemuan is not None:
+        query = query.filter(KehadiranMurid.pertemuan == pertemuan)
+
+    return query
+
+
+def _pertemuan_terisi_absensi(id_jadwal_group):
+    if not id_jadwal_group:
+        return []
+
+    query = db.session.query(KehadiranMurid.pertemuan).filter(
+        KehadiranMurid.id_jadwal.in_(id_jadwal_group)
+    )
+    semester, tahun_ajaran = _periode_absensi_aktif_values()
+    if semester:
+        query = query.filter(KehadiranMurid.semester == semester)
+    if tahun_ajaran:
+        query = query.filter(KehadiranMurid.tahun_ajaran == tahun_ajaran)
+
+    rows = (
+        query
+        .filter(KehadiranMurid.pertemuan.isnot(None))
+        .distinct()
+        .order_by(KehadiranMurid.pertemuan.asc())
+        .all()
+    )
+    return [int(row[0]) for row in rows if row[0] is not None]
+
+
+def _absensi_murid_payload(id_jadwal, pertemuan=None):
+    """
+    Ambil data kehadiran berdasarkan pertemuan yang sudah diinput.
+
+    Sebelumnya data dicari berdasarkan tanggal laporan/hari ini. Cara itu dapat
+    menghasilkan data kosong ketika tanggal input absensi berbeda, timezone
+    server berbeda, atau guru membuka laporan setelah pergantian tanggal.
+    Sekarang sumber data dipilih berdasarkan nomor pertemuan pada periode aktif.
+    """
     jadwal, id_jadwal_group = _jadwal_group_ids_absensi(id_jadwal)
 
     total_murid = 0
     if jadwal:
         total_murid = Murid.query.filter_by(id_kelas=jadwal.id_kelas).count()
 
-    if not id_jadwal_group:
-        return {
-            "id_jadwal": id_jadwal,
-            "id_jadwal_group": [],
-            "tanggal": str(tanggal_value),
-            "total_murid": total_murid,
-            "jumlah_hadir": 0,
-            "jumlah_tidak_hadir": 0,
-            "daftar_hadir": "",
-            "daftar_tidak_hadir": "",
-            "data_tersedia": False,
-        }
+    pertemuan_terisi = _pertemuan_terisi_absensi(id_jadwal_group)
+
+    if pertemuan is not None:
+        try:
+            pertemuan = int(pertemuan)
+        except Exception:
+            pertemuan = None
+
+    # Kompatibilitas dengan frontend lama: bila belum mengirim pertemuan,
+    # gunakan pertemuan terisi paling akhir. Frontend baru tetap meminta guru
+    # memilih pertemuan secara eksplisit.
+    if pertemuan is None and pertemuan_terisi:
+        pertemuan = pertemuan_terisi[-1]
+
+    base_payload = {
+        "id_jadwal": id_jadwal,
+        "id_jadwal_group": id_jadwal_group,
+        "pertemuan": pertemuan,
+        "pertemuan_terisi": pertemuan_terisi,
+        "total_murid": total_murid,
+        "jumlah_hadir": 0,
+        "jumlah_tidak_hadir": 0,
+        "daftar_hadir": "",
+        "daftar_tidak_hadir": "",
+        "data_tersedia": False,
+    }
+
+    if not id_jadwal_group or pertemuan is None or pertemuan not in pertemuan_terisi:
+        return base_payload
 
     rows = (
-        db.session.query(KehadiranMurid, Murid)
-        .join(Murid, Murid.id_murid == KehadiranMurid.id_murid)
-        .filter(
-            KehadiranMurid.id_jadwal.in_(id_jadwal_group),
-            KehadiranMurid.tanggal == tanggal_value,
-        )
-        .order_by(
-            KehadiranMurid.pertemuan.asc(),
-            KehadiranMurid.id_kehadiran.asc(),
-        )
+        _absensi_murid_query(id_jadwal_group, pertemuan=pertemuan)
+        .order_by(KehadiranMurid.id_kehadiran.asc())
         .all()
     )
 
-    # Jika ada input lebih dari satu kali pada tanggal yang sama,
-    # ambil data terakhir per murid berdasarkan id_kehadiran terbesar.
+    # Antisipasi data lama yang mungkin tersimpan lebih dari sekali pada grup
+    # J1/J2/J3: ambil data terakhir per murid.
     latest = {}
     for kehadiran, murid in rows:
         old = latest.get(kehadiran.id_murid)
@@ -308,17 +368,14 @@ def _absensi_murid_payload(id_jadwal, tanggal_value=None):
             status_label = kehadiran.status or "Alpa"
             tidak_hadir.append(f"{label} ({status_label})")
 
-    return {
-        "id_jadwal": id_jadwal,
-        "id_jadwal_group": id_jadwal_group,
-        "tanggal": str(tanggal_value),
-        "total_murid": total_murid,
+    base_payload.update({
         "jumlah_hadir": len(hadir),
         "jumlah_tidak_hadir": len(tidak_hadir),
         "daftar_hadir": "; ".join(hadir),
         "daftar_tidak_hadir": "; ".join(tidak_hadir),
         "data_tersedia": len(latest) > 0,
-    }
+    })
+    return base_payload
 
 def _get_kehadiran_guru(id_guru, tanggal, id_jadwal=None):
     if not id_guru or not tanggal:
@@ -760,7 +817,7 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             func.lower(func.trim(Jadwal.hari)) == hari.lower(),
             _jadwal_kelas_belum_selesai_expr(),
         )
-        .order_by(Jadwal.jam_mulai.desc(), Guru.nama_guru.asc())
+        .order_by(Jadwal.jam_mulai.asc(), Guru.nama_guru.asc())
         .all()
     )
 
@@ -877,32 +934,6 @@ def pengajuan_kehadiran_guru():
     if monitor and monitor.jam_masuk:
         return jsonify({"message": "Anda sudah absen masuk pada jadwal ini"}), 409
 
-    kehadiran_sekarang = _get_kehadiran_guru(id_guru, today, id_jadwal)
-    pengajuan_sekarang = _pengajuan_value(kehadiran_sekarang)
-    status_sekarang = _status_kehadiran_manual(kehadiran_sekarang)
-    if (
-        status_sekarang in ["Izin", "Sakit"]
-        and pengajuan_sekarang in ["menunggu", "disetujui"]
-    ):
-        return jsonify({
-            "message": "Pengajuan izin/sakit untuk jadwal ini sudah ada"
-        }), 409
-
-    if _jadwal_sudah_selesai(jadwal, today):
-        item = _upsert_kehadiran_guru(
-            id_guru=id_guru,
-            tanggal=today,
-            id_jadwal=id_jadwal,
-            status="Alpa",
-            keterangan=f"Pengajuan ditolak otomatis karena jadwal sudah selesai - {_jadwal_label(id_jadwal)}",
-        )
-        db.session.commit()
-        return jsonify({
-            "message": "Waktu jadwal sudah lewat. Pengajuan izin/sakit dikunci dan status menjadi Alpa",
-            "id_kehadiran_guru": item.id_kehadiran if item else None,
-            "status": "Alpa",
-        }), 409
-
     bukti_path = None
     try:
         bukti_path = _save_bukti_file(request.files.get("bukti"))
@@ -950,6 +981,7 @@ def laporan_mengajar():
     bawa_data_kehadiran = str(data.get("bawa_data_kehadiran") or "").strip().lower() in ["true", "1", "ya", "yes"]
     daftar_hadir = str(data.get("daftar_hadir") or "").strip()
     daftar_tidak_hadir = str(data.get("daftar_tidak_hadir") or "").strip()
+    pertemuan_kehadiran = data.get("pertemuan_kehadiran") or data.get("pertemuan")
 
     if not id_monitor:
         return jsonify({"message": "id_monitor wajib"}), 400
@@ -989,19 +1021,36 @@ def laporan_mengajar():
     if _jadwal_kelas_selesai(jadwal):
         return jsonify({"message": "Jadwal sudah selesai dan tidak aktif lagi"}), 400
 
+    if bawa_data_kehadiran:
+        if pertemuan_kehadiran is not None and str(pertemuan_kehadiran).strip() != "":
+            try:
+                pertemuan_kehadiran = int(pertemuan_kehadiran)
+            except Exception:
+                return jsonify({"message": "Pertemuan kehadiran tidak valid"}), 400
+
+        prefill = _absensi_murid_payload(
+            monitor.id_jadwal,
+            pertemuan=pertemuan_kehadiran,
+        )
+        if not prefill["data_tersedia"]:
+            return jsonify({
+                "message": "Data kehadiran pada pertemuan yang dipilih tidak tersedia",
+                "pertemuan_terisi": prefill["pertemuan_terisi"],
+            }), 400
+
+        # Selalu hitung ulang dari database agar angka/daftar yang dikirim
+        # frontend tidak dapat tertinggal atau berbeda dari Input Kehadiran.
+        jumlah_hadir = prefill["jumlah_hadir"]
+        jumlah_tidak_hadir = prefill["jumlah_tidak_hadir"]
+        daftar_hadir = prefill["daftar_hadir"]
+        daftar_tidak_hadir = prefill["daftar_tidak_hadir"]
+
     if jadwal:
         total_murid = Murid.query.filter_by(id_kelas=jadwal.id_kelas).count()
         if total_murid > 0 and (jumlah_hadir + jumlah_tidak_hadir) != total_murid:
             return jsonify({
                 "message": f"Jumlah hadir + tidak hadir harus sama dengan total murid ({total_murid})"
             }), 400
-
-    if bawa_data_kehadiran and (not daftar_hadir and not daftar_tidak_hadir):
-        prefill = _absensi_murid_payload(monitor.id_jadwal, monitor.tanggal)
-        jumlah_hadir = prefill["jumlah_hadir"]
-        jumlah_tidak_hadir = prefill["jumlah_tidak_hadir"]
-        daftar_hadir = prefill["daftar_hadir"]
-        daftar_tidak_hadir = prefill["daftar_tidak_hadir"]
 
     if monitor.jam_keluar:
         return jsonify({"message": "Laporan tidak bisa diubah setelah absen keluar"}), 400
@@ -1086,15 +1135,14 @@ def prefill_kehadiran_laporan_mengajar(id_jadwal):
     if _jadwal_kelas_selesai(jadwal):
         return jsonify({"message": "Jadwal sudah selesai dan tidak aktif lagi"}), 404
 
-    tanggal_text = request.args.get("tanggal")
-    tanggal_value = _today_app()
-    if tanggal_text:
+    pertemuan = request.args.get("pertemuan")
+    if pertemuan is not None and str(pertemuan).strip() != "":
         try:
-            tanggal_value = datetime.strptime(tanggal_text, "%Y-%m-%d").date()
+            pertemuan = int(pertemuan)
         except Exception:
-            tanggal_value = _today_app()
+            return jsonify({"message": "Pertemuan harus berupa angka"}), 400
 
-    return jsonify(_absensi_murid_payload(id_jadwal, tanggal_value)), 200
+    return jsonify(_absensi_murid_payload(id_jadwal, pertemuan=pertemuan)), 200
 
 
 @monitoring_bp.route("/guru/absen-keluar", methods=["POST"])
