@@ -5,6 +5,7 @@ from io import BytesIO
 from zoneinfo import ZoneInfo
 import os
 import uuid
+import re
 
 from flask_jwt_extended import jwt_required, get_jwt
 from sqlalchemy import func
@@ -512,6 +513,17 @@ def _add_keterangan(item, text):
         item.keterangan = f"{old}; {text}" if old else text
 
 
+def _waktu_dari_keterangan(keterangan, jenis):
+    text = str(keterangan or "")
+    if jenis == "pengajuan":
+        pattern = r"Pengajuan (?:Izin|Sakit) dikirim (\d{2}:\d{2}:\d{2})"
+    else:
+        pattern = r"(?:disetujui|ditolak) admin (\d{2}:\d{2}:\d{2})"
+
+    matches = re.findall(pattern, text, flags=re.IGNORECASE)
+    return matches[-1] if matches else None
+
+
 def _pengajuan_value(item):
     return str(getattr(item, "status_pengajuan", "") or "").strip().lower()
 
@@ -940,12 +952,16 @@ def pengajuan_kehadiran_guru():
     except ValueError as exc:
         return jsonify({"message": str(exc)}), 400
 
+    waktu_pengajuan = _now_app().time().strftime("%H:%M:%S")
     item = _upsert_kehadiran_guru(
         id_guru=id_guru,
         tanggal=today,
         id_jadwal=id_jadwal,
         status=status_text,
-        keterangan=f"Pengajuan {status_text} - {_jadwal_label(id_jadwal)}",
+        keterangan=(
+            f"Pengajuan {status_text} dikirim {waktu_pengajuan} - "
+            f"{_jadwal_label(id_jadwal)}"
+        ),
         alasan=alasan_text,
         bukti=bukti_path,
         status_pengajuan="Menunggu",
@@ -961,6 +977,8 @@ def pengajuan_kehadiran_guru():
         "bukti": item.bukti,
         "bukti_url": _bukti_url(item.bukti),
         "status_pengajuan": item.status_pengajuan,
+        "waktu_pengajuan": waktu_pengajuan,
+        "keterangan": item.keterangan,
     }), 201
 
 
@@ -1244,6 +1262,15 @@ def status_absen(id_jadwal):
             "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
             "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
             "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
+            "keterangan": getattr(kehadiran_guru, "keterangan", None) if kehadiran_guru else None,
+            "waktu_pengajuan": _waktu_dari_keterangan(
+                getattr(kehadiran_guru, "keterangan", None), "pengajuan"
+            ) if kehadiran_guru else None,
+            "waktu_respon_admin": _waktu_dari_keterangan(
+                getattr(kehadiran_guru, "keterangan", None), "respon"
+            ) if kehadiran_guru else None,
+            "jam_masuk": None,
+            "jam_keluar": None,
             "sudah_laporan": False,
             "laporan_mengajar": None
         }), 200
@@ -1267,6 +1294,15 @@ def status_absen(id_jadwal):
         "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
         "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
         "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
+        "keterangan": getattr(kehadiran_guru, "keterangan", None) if kehadiran_guru else None,
+        "waktu_pengajuan": _waktu_dari_keterangan(
+            getattr(kehadiran_guru, "keterangan", None), "pengajuan"
+        ) if kehadiran_guru else None,
+        "waktu_respon_admin": _waktu_dari_keterangan(
+            getattr(kehadiran_guru, "keterangan", None), "respon"
+        ) if kehadiran_guru else None,
+        "jam_masuk": _fmt_time(data.jam_masuk),
+        "jam_keluar": _fmt_time(data.jam_keluar),
         "sudah_laporan": laporan is not None,
         "laporan_mengajar": _laporan_payload(laporan)
     }), 200
@@ -1291,13 +1327,20 @@ def proses_pengajuan_kehadiran_guru(id_kehadiran):
 
     jadwal = Jadwal.query.get(item.id_jadwal)
 
+    waktu_respon = _now_app().time().strftime("%H:%M:%S")
     if aksi in ["setujui", "approve", "disetujui"]:
         item.status_pengajuan = "Disetujui"
-        _add_keterangan(item, f"Pengajuan {status_manual} disetujui admin")
+        _add_keterangan(
+            item,
+            f"Pengajuan {status_manual} disetujui admin {waktu_respon}",
+        )
         message = f"Pengajuan {status_manual.lower()} disetujui"
     else:
         item.status_pengajuan = "Ditolak"
-        _add_keterangan(item, f"Pengajuan {status_manual} ditolak admin")
+        _add_keterangan(
+            item,
+            f"Pengajuan {status_manual} ditolak admin {waktu_respon}",
+        )
         if _jadwal_sudah_selesai(jadwal, item.tanggal):
             item.status = "Alpa"
             _add_keterangan(item, "Menjadi Alpa karena jadwal sudah selesai")
@@ -1313,6 +1356,8 @@ def proses_pengajuan_kehadiran_guru(id_kehadiran):
         "alasan": item.alasan,
         "bukti": item.bukti,
         "bukti_url": _bukti_url(item.bukti),
+        "waktu_respon_admin": waktu_respon,
+        "keterangan": item.keterangan,
     }), 200
 
 
