@@ -31,6 +31,7 @@ class KehadiranGuru(db.Model):
     status = db.Column(db.String(30), nullable=False, default="Hadir")
     keterangan = db.Column(db.String(255), nullable=True)
     alasan = db.Column(db.Text, nullable=True)
+    instruksi = db.Column(db.Text, nullable=True)
     bukti = db.Column(db.String(255), nullable=True)
     status_pengajuan = db.Column(db.String(30), nullable=True)
 
@@ -53,6 +54,7 @@ class KehadiranGuru(db.Model):
             "status": self.status,
             "keterangan": self.keterangan,
             "alasan": self.alasan,
+            "instruksi": self.instruksi,
             "bukti": self.bukti,
             "status_pengajuan": self.status_pengajuan,
         }
