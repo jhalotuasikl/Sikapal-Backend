@@ -26,6 +26,14 @@ def ensure_schema(db):
                 ADD COLUMN status_kirim TINYINT(1) NOT NULL DEFAULT 0
             """))
             db.session.commit()
+
+        # kehadiran_guru.instruksi (instruksi saat guru izin/sakit)
+        if not _column_exists(db, "kehadiran_guru", "instruksi"):
+            db.session.execute(text("""
+                ALTER TABLE kehadiran_guru
+                ADD COLUMN instruksi TEXT NULL AFTER alasan
+            """))
+            db.session.commit()
     except SQLAlchemyError:
         db.session.rollback()
     except Exception:
