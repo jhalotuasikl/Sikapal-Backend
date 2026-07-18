@@ -402,6 +402,7 @@ def _upsert_kehadiran_guru(
     status="Hadir",
     keterangan=None,
     alasan=None,
+    instruksi=None,
     bukti=None,
     status_pengajuan=None,
 ):
@@ -426,6 +427,8 @@ def _upsert_kehadiran_guru(
 
         if alasan is not None:
             item.alasan = alasan
+        if instruksi is not None:
+            item.instruksi = instruksi
         if bukti is not None:
             item.bukti = bukti
         if status_pengajuan is not None:
@@ -433,6 +436,7 @@ def _upsert_kehadiran_guru(
 
         if str(next_status).strip().lower() == "hadir":
             item.alasan = None
+            item.instruksi = None
             item.bukti = None
             item.status_pengajuan = None
 
@@ -445,6 +449,7 @@ def _upsert_kehadiran_guru(
         status=next_status,
         keterangan=keterangan,
         alasan=alasan,
+        instruksi=instruksi,
         bukti=bukti,
         status_pengajuan=status_pengajuan,
     )
@@ -636,6 +641,7 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None, 
         "mapel": mapel.nama_mapel if mapel else "-",
         "status_jadwal": getattr(jadwal, "status", "aktif") if jadwal else "aktif",
         "status_kelas": getattr(kelas, "status", "aktif") if kelas else "aktif",
+        "hari_jadwal": getattr(jadwal, "hari", None) if jadwal else None,
         "jam_jadwal_mulai": _fmt_jadwal_time(jadwal.jam_mulai),
         "jam_jadwal_selesai": _fmt_jadwal_time(jadwal.jam_selesai),
         "masuk": masuk,
@@ -646,6 +652,7 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None, 
         "kehadiran_guru": kehadiran_guru.status if kehadiran_guru else None,
         "keterangan_kehadiran": kehadiran_guru.keterangan if kehadiran_guru else None,
         "alasan": getattr(kehadiran_guru, "alasan", None) if kehadiran_guru else None,
+        "instruksi": getattr(kehadiran_guru, "instruksi", None) if kehadiran_guru else None,
         "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
         "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
         "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
@@ -920,6 +927,7 @@ def pengajuan_kehadiran_guru():
     id_jadwal = request.form.get("id_jadwal") or payload_json.get("id_jadwal")
     status = request.form.get("status") or payload_json.get("status")
     alasan = request.form.get("alasan") or payload_json.get("alasan")
+    instruksi = request.form.get("instruksi") or payload_json.get("instruksi")
 
     try:
         id_jadwal = int(id_jadwal)
@@ -933,6 +941,12 @@ def pengajuan_kehadiran_guru():
     alasan_text = str(alasan or "").strip()
     if len(alasan_text) < 3:
         return jsonify({"message": "Alasan izin/sakit wajib diisi"}), 400
+
+    instruksi_text = str(instruksi or "").strip()
+    if len(instruksi_text) < 3:
+        return jsonify({
+            "message": "Instruksi yang telah diberikan kepada murid/guru pengganti wajib diisi"
+        }), 400
 
     if not jadwal_milik_guru(id_jadwal, int(id_guru)):
         return jsonify({"message": "Jadwal tidak valid"}), 403
@@ -963,6 +977,7 @@ def pengajuan_kehadiran_guru():
             f"{_jadwal_label(id_jadwal)}"
         ),
         alasan=alasan_text,
+        instruksi=instruksi_text,
         bukti=bukti_path,
         status_pengajuan="Menunggu",
     )
@@ -974,6 +989,7 @@ def pengajuan_kehadiran_guru():
         "id_kehadiran_guru": item.id_kehadiran,
         "status": item.status,
         "alasan": item.alasan,
+        "instruksi": item.instruksi,
         "bukti": item.bukti,
         "bukti_url": _bukti_url(item.bukti),
         "status_pengajuan": item.status_pengajuan,
@@ -1259,6 +1275,7 @@ def status_absen(id_jadwal):
             "status_label": status_ui,
             "id_kehadiran_guru": kehadiran_guru.id_kehadiran if kehadiran_guru else None,
             "alasan": getattr(kehadiran_guru, "alasan", None) if kehadiran_guru else None,
+            "instruksi": getattr(kehadiran_guru, "instruksi", None) if kehadiran_guru else None,
             "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
             "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
             "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
@@ -1291,6 +1308,7 @@ def status_absen(id_jadwal):
         "id_monitor": data.id_monitor,
         "id_kehadiran_guru": kehadiran_guru.id_kehadiran if kehadiran_guru else None,
         "alasan": getattr(kehadiran_guru, "alasan", None) if kehadiran_guru else None,
+        "instruksi": getattr(kehadiran_guru, "instruksi", None) if kehadiran_guru else None,
         "bukti": getattr(kehadiran_guru, "bukti", None) if kehadiran_guru else None,
         "bukti_url": _bukti_url(getattr(kehadiran_guru, "bukti", None)) if kehadiran_guru else None,
         "status_pengajuan": getattr(kehadiran_guru, "status_pengajuan", None) if kehadiran_guru else None,
@@ -1354,11 +1372,82 @@ def proses_pengajuan_kehadiran_guru(id_kehadiran):
         "status": item.status,
         "status_pengajuan": item.status_pengajuan,
         "alasan": item.alasan,
+        "instruksi": item.instruksi,
         "bukti": item.bukti,
         "bukti_url": _bukti_url(item.bukti),
         "waktu_respon_admin": waktu_respon,
         "keterangan": item.keterangan,
     }), 200
+
+
+# =====================================================
+# RIWAYAT MONITORING GURU (MAKSIMAL 1 MINGGU)
+# =====================================================
+@monitoring_bp.route("/guru/monitoring", methods=["GET"])
+@jwt_required()
+def monitoring_guru():
+    claims = get_jwt()
+    if claims.get("role") != "guru":
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    if request.args.get("mode", "history").strip().lower() != "history":
+        return jsonify({"message": "Mode yang tersedia adalah history"}), 400
+
+    try:
+        id_guru = int(claims.get("id_guru"))
+    except Exception:
+        return jsonify({"message": "id_guru tidak ada di token"}), 400
+
+    today = _today_app()
+    cutoff = today - timedelta(days=7)
+
+    # Kehadiran/status tetap memakai tanggal aslinya, sedangkan kelas, mapel,
+    # hari, dan jam selalu diambil dari tabel jadwal TERBARU. Karena query
+    # melakukan inner join ke Jadwal, jadwal yang dihapus tidak ikut tampil.
+    rows = (
+        db.session.query(
+            Jadwal,
+            Kelas,
+            MataPelajaran,
+            Guru,
+            LaporanMonitoring,
+            LaporanMengajar,
+            KehadiranGuru,
+        )
+        .join(Jadwal, Jadwal.id_jadwal == KehadiranGuru.id_jadwal)
+        .join(Guru, Guru.id_guru == KehadiranGuru.id_guru)
+        .join(Kelas, Kelas.id_kelas == Jadwal.id_kelas)
+        .join(MataPelajaran, MataPelajaran.id_mapel == Jadwal.id_mapel)
+        .outerjoin(
+            LaporanMonitoring,
+            db.and_(
+                LaporanMonitoring.id_jadwal == KehadiranGuru.id_jadwal,
+                LaporanMonitoring.tanggal == KehadiranGuru.tanggal,
+            ),
+        )
+        .outerjoin(
+            LaporanMengajar,
+            LaporanMengajar.id_monitor == LaporanMonitoring.id_monitor,
+        )
+        .filter(
+            KehadiranGuru.id_guru == id_guru,
+            KehadiranGuru.tanggal >= cutoff,
+            KehadiranGuru.tanggal < today,
+            KehadiranGuru.status.in_(["Hadir", "Izin", "Sakit", "Alpa"]),
+            _jadwal_kelas_belum_selesai_expr(),
+        )
+        .order_by(
+            KehadiranGuru.tanggal.desc(),
+            Jadwal.jam_mulai.desc(),
+            Jadwal.id_jadwal.desc(),
+        )
+        .all()
+    )
+
+    return jsonify([
+        _monitoring_payload_from_row(row)
+        for row in rows
+    ]), 200
 
 
 # =====================================================
@@ -1424,6 +1513,20 @@ def _kehadiran_excel(payload):
     return "Alpa"
 
 
+def _alasan_instruksi_excel(payload):
+    alasan = str(payload.get("alasan") or "").strip()
+    instruksi = str(payload.get("instruksi") or "").strip()
+    bagian = []
+    if alasan:
+        bagian.append(alasan.rstrip(" .") + ".")
+    if instruksi:
+        bagian.append(
+            "Instruksi yang telah diberikan kepada murid/guru pengganti "
+            + instruksi.lstrip()
+        )
+    return " ".join(bagian).strip() or "-"
+
+
 def _status_excel(payload):
     """
     Kolom Status tetap mengambil status proses monitoring.
@@ -1471,6 +1574,7 @@ def export_monitoring_admin():
         "Kehadiran",
         "Tanggal",
         "Status",
+        "Alasan",
         "Murid Hadir",
         "Materi",
         "Murid Tidak Hadir",
@@ -1494,6 +1598,7 @@ def export_monitoring_admin():
             _safe_sheet_value(_kehadiran_excel(payload)),
             _safe_sheet_value(payload.get("tanggal")),
             _safe_sheet_value(_status_excel(payload)),
+            _safe_sheet_value(_alasan_instruksi_excel(payload)),
             _safe_sheet_value(
                 payload.get("jumlah_hadir")
                 if payload.get("jumlah_hadir") is not None
@@ -1516,11 +1621,12 @@ def export_monitoring_admin():
         "D": 18,
         "E": 16,
         "F": 18,
-        "G": 16,
-        "H": 34,
-        "I": 20,
-        "J": 42,
+        "G": 54,
+        "H": 16,
+        "I": 34,
+        "J": 20,
         "K": 42,
+        "L": 42,
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
