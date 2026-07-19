@@ -84,6 +84,66 @@ def hari_indonesia_lower():
     return map_hari[_now_app().strftime("%A")]
 
 
+def _normalisasi_hari(value):
+    """Normalisasi nama hari agar perbandingan jadwal konsisten."""
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z]", "", text)
+    aliases = {
+        "senin": "senin",
+        "selasa": "selasa",
+        "rabu": "rabu",
+        "kamis": "kamis",
+        "jumat": "jumat",
+        "sabtu": "sabtu",
+        "minggu": "minggu",
+    }
+    return aliases.get(text, text)
+
+
+def _hari_tanggal_indonesia(value):
+    """Ambil nama hari Indonesia dari DATE/DATETIME/string database."""
+    if value is None:
+        return ""
+
+    tanggal = value
+    if isinstance(value, datetime):
+        tanggal = value.date()
+    elif not isinstance(value, date):
+        raw = str(value).strip()
+        if not raw:
+            return ""
+        try:
+            tanggal = datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        except Exception:
+            try:
+                tanggal = datetime.strptime(raw.split("T")[0].split(" ")[0], "%Y-%m-%d").date()
+            except Exception:
+                return ""
+
+    nama_hari = ["senin", "selasa", "rabu", "kamis", "jumat", "sabtu", "minggu"]
+    return nama_hari[tanggal.weekday()]
+
+
+def _riwayat_sesuai_jadwal_terbaru(row):
+    """
+    Riwayat hanya valid bila tanggal lama masih jatuh pada hari jadwal terbaru.
+
+    - Jika hanya jam diedit, riwayat tetap tampil dengan jam terbaru.
+    - Jika hari dipindah, riwayat pada hari lama tidak ditampilkan.
+    - Jika jadwal dihapus, inner join ke Jadwal otomatis menghilangkannya.
+    """
+    jadwal, _, _, _, monitor, _, kehadiran = _unpack_monitoring_row(row)
+    tanggal = getattr(kehadiran, "tanggal", None) or getattr(monitor, "tanggal", None)
+    if jadwal is None or tanggal is None:
+        return False
+
+    return _normalisasi_hari(getattr(jadwal, "hari", None)) == _hari_tanggal_indonesia(tanggal)
+
+
+def _filter_riwayat_jadwal_terbaru(rows):
+    return [row for row in rows if _riwayat_sesuai_jadwal_terbaru(row)]
+
+
 def _fmt_time(value):
     return value.strftime("%H:%M:%S") if value else None
 
@@ -802,11 +862,12 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             except Exception:
                 pass
 
-        return q.order_by(
+        rows = q.order_by(
             KehadiranGuru.tanggal.desc(),
             Jadwal.jam_mulai.desc(),
             Guru.nama_guru.asc(),
         ).all()
+        return _filter_riwayat_jadwal_terbaru(rows)
 
     today = _today_app()
     hari = hari_indonesia_lower()
@@ -1443,6 +1504,8 @@ def monitoring_guru():
         )
         .all()
     )
+
+    rows = _filter_riwayat_jadwal_terbaru(rows)
 
     return jsonify([
         _monitoring_payload_from_row(row)
