@@ -21,6 +21,7 @@ from app.models.kehadiran_murid import KehadiranMurid
 from app.models.kehadiran_guru import KehadiranGuru
 from app.models.nilai import Nilai
 from app.models.monitoring import LaporanMonitoring
+from app.models.mengajar import LaporanMengajar
 from app.models.kuisoner import Kuisoner
 from app.models.murid_mapel import MuridMapel
 from app.models.kelas_mapel import kelas_mapel
@@ -153,6 +154,76 @@ HARI_ORDER_INDEX = {
 def hari_order_value(value):
     text = str(value or "").strip().lower().replace("’", "'")
     return HARI_ORDER_INDEX.get(text, 99)
+
+
+def _jadwal_baru_belum_berlalu(hari, jam_selesai):
+    """
+    Menilai posisi jadwal baru pada minggu berjalan.
+
+    - Hari setelah hari ini dianggap akan datang.
+    - Hari sebelum hari ini dianggap sudah menjadi riwayat minggu ini.
+    - Untuk hari ini, jadwal dianggap belum berlalu selama jam selesai baru
+      masih lebih besar dari waktu aplikasi saat ini.
+    """
+    now_app = _now_app()
+    target_day = hari_order_value(hari)
+    today_day = now_app.isoweekday()
+
+    if target_day == 99 or jam_selesai is None:
+        return False
+    if target_day > today_day:
+        return True
+    if target_day < today_day:
+        return False
+    return now_app.time() < jam_selesai
+
+
+def _reset_status_guru_minggu_berjalan(id_jadwal):
+    """
+    Mengosongkan proses kehadiran guru pada minggu berjalan ketika jadwal
+    dipindah ke waktu yang belum berlalu. Data minggu sebelumnya tetap utuh.
+
+    Laporan mengajar dihapus lebih dahulu karena memiliki foreign key menuju
+    laporan_monitoring. Setelah ketiga data proses dihapus, status endpoint
+    kembali menghitung "Belum Absen" berdasarkan hari/jam jadwal terbaru.
+    """
+    now_app = _now_app()
+    week_start = now_app.date() - timedelta(days=now_app.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    monitor_ids = [
+        id_monitor
+        for (id_monitor,) in db.session.query(LaporanMonitoring.id_monitor).filter(
+            LaporanMonitoring.id_jadwal == id_jadwal,
+            LaporanMonitoring.tanggal >= week_start,
+            LaporanMonitoring.tanggal <= week_end,
+        ).all()
+    ]
+
+    deleted_laporan = 0
+    if monitor_ids:
+        deleted_laporan = LaporanMengajar.query.filter(
+            LaporanMengajar.id_monitor.in_(monitor_ids)
+        ).delete(synchronize_session=False)
+
+    deleted_monitoring = LaporanMonitoring.query.filter(
+        LaporanMonitoring.id_jadwal == id_jadwal,
+        LaporanMonitoring.tanggal >= week_start,
+        LaporanMonitoring.tanggal <= week_end,
+    ).delete(synchronize_session=False)
+
+    deleted_kehadiran = KehadiranGuru.query.filter(
+        KehadiranGuru.id_jadwal == id_jadwal,
+        KehadiranGuru.tanggal >= week_start,
+        KehadiranGuru.tanggal <= week_end,
+    ).delete(synchronize_session=False)
+
+    return {
+        "id_jadwal": id_jadwal,
+        "kehadiran_guru": deleted_kehadiran,
+        "monitoring": deleted_monitoring,
+        "laporan_mengajar": deleted_laporan,
+    }
 
 
 def jadwal_sort_key_from_tuple(row):
@@ -1020,6 +1091,14 @@ def admin_update_jadwal(id_jadwal):
 
     jadwal_group = get_jadwal_group(jadwal_utama)
     allowed_ids = {row.id_jadwal for row in jadwal_group}
+    jadwal_lama_by_id = {
+        row.id_jadwal: {
+            "hari": row.hari,
+            "jam_mulai": row.jam_mulai,
+            "jam_selesai": row.jam_selesai,
+        }
+        for row in jadwal_group
+    }
 
     parsed_rows = []
     for idx, row in enumerate(raw_list, start=1):
@@ -1091,6 +1170,26 @@ def admin_update_jadwal(id_jadwal):
             db.session.rollback()
             return jsonify(bentrok_guru), 409
 
+    reset_status = []
+    for row in parsed_rows:
+        jadwal_lama = jadwal_lama_by_id.get(row["id_jadwal"], {})
+        berubah = (
+            normalisasi_hari(jadwal_lama.get("hari")) != row["hari"]
+            or jadwal_lama.get("jam_mulai") != row["jam_mulai"]
+            or jadwal_lama.get("jam_selesai") != row["jam_selesai"]
+        )
+
+        # Status lama hanya direset ketika posisi jadwal baru pada minggu ini
+        # belum berlalu. Jika jadwal baru sudah menjadi riwayat, status lama
+        # tetap dipertahankan.
+        if berubah and _jadwal_baru_belum_berlalu(
+            row["hari"],
+            row["jam_selesai"],
+        ):
+            reset_status.append(
+                _reset_status_guru_minggu_berjalan(row["id_jadwal"])
+            )
+
     try:
         db.session.commit()
     except Exception as e:
@@ -1105,6 +1204,7 @@ def admin_update_jadwal(id_jadwal):
         "message": "Jadwal berhasil diubah",
         "id_jadwal_list": [row.id_jadwal for row in jadwal_group_baru],
         "jadwal_group": [serialize_jadwal_row(row, idx) for idx, row in enumerate(jadwal_group_baru, start=1)],
+        "status_absen_direset": reset_status,
     }), 200
 
 
