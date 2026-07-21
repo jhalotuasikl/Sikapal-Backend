@@ -333,6 +333,169 @@ def create_kuisoner():
         }
     }), 201
 
+
+@kuisoner_bp.route("/kuisoner/bulk", methods=["POST"])
+@jwt_required()
+def create_kuisoner_bulk():
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Hanya admin yang dapat membuat kuisoner"}), 403
+
+    data = request.get_json() or {}
+    raw_ids = data.get("id_jadwal_list") or []
+    semester = str(data.get("semester") or "").strip()
+    status = str(data.get("status") or "").strip()
+    tahun_ajaran_fallback = str(data.get("tahun_ajaran") or "").strip()
+
+    if status != "dibuka":
+        return jsonify({
+            "message": "Pembuatan seluruh kuisoner hanya dapat dijalankan dengan status Dibuka"
+        }), 400
+
+    if semester not in ["1", "2", "ganjil", "genap"]:
+        return jsonify({"message": "Semester tidak valid"}), 400
+
+    id_jadwal_list = []
+    for value in raw_ids:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed not in id_jadwal_list:
+            id_jadwal_list.append(parsed)
+
+    if not id_jadwal_list:
+        return jsonify({"message": "Daftar jadwal aktif tidak tersedia"}), 400
+
+    dibuat = []
+    dilewati = []
+
+    try:
+        for id_jadwal in id_jadwal_list:
+            jadwal = Jadwal.query.get(id_jadwal)
+            if not jadwal:
+                dilewati.append({"id_jadwal": id_jadwal, "alasan": "Jadwal tidak ditemukan"})
+                continue
+
+            kelas = Kelas.query.get(jadwal.id_kelas)
+            if not jadwal_bisa_dibuat_kuisoner(jadwal, kelas):
+                dilewati.append({"id_jadwal": id_jadwal, "alasan": "Jadwal atau kelas sudah selesai"})
+                continue
+
+            tahun_ajaran = (
+                _ambil_attr(jadwal, ["tahun_ajaran", "tahunAjaran", "ta", "tahun"], default=None)
+                or _ambil_attr(kelas, ["tahun_ajaran", "tahunAjaran", "ta", "tahun"], default=None)
+                or tahun_ajaran_fallback
+            )
+            tahun_ajaran = str(tahun_ajaran or "").strip()
+
+            if not tahun_ajaran:
+                dilewati.append({"id_jadwal": id_jadwal, "alasan": "Tahun ajaran tidak tersedia"})
+                continue
+
+            existing = Kuisoner.query.filter_by(
+                id_jadwal=id_jadwal,
+                semester=semester,
+                tahun_ajaran=tahun_ajaran,
+            ).first()
+            if existing:
+                dilewati.append({"id_jadwal": id_jadwal, "alasan": "Kuisoner sudah ada"})
+                continue
+
+            kuisoner = Kuisoner(
+                id_jadwal=id_jadwal,
+                semester=semester,
+                tahun_ajaran=tahun_ajaran,
+                status="dibuka",
+                tanggal_dibuka=datetime.utcnow(),
+            )
+            db.session.add(kuisoner)
+            db.session.flush()
+            dibuat.append({
+                "id_kuisoner": kuisoner.id_kuisoner,
+                "id_jadwal": id_jadwal,
+                "tahun_ajaran": tahun_ajaran,
+            })
+
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({
+            "message": "Gagal membuat kuisoner secara massal",
+            "error": str(exc),
+        }), 500
+
+    if not dibuat:
+        return jsonify({
+            "message": "Tidak ada kuisoner baru yang dibuat; seluruh jadwal mungkin sudah memiliki kuisoner",
+            "jumlah_dibuat": 0,
+            "jumlah_dilewati": len(dilewati),
+            "dilewati": dilewati,
+        }), 200
+
+    return jsonify({
+        "message": f"{len(dibuat)} kuisoner berhasil dibuat dan dibuka",
+        "jumlah_dibuat": len(dibuat),
+        "jumlah_dilewati": len(dilewati),
+        "dibuat": dibuat,
+        "dilewati": dilewati,
+    }), 201
+
+
+@kuisoner_bp.route("/kuisoner/status/bulk", methods=["PUT"])
+@jwt_required()
+def update_status_kuisoner_bulk():
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Hanya admin yang dapat mengubah status kuisoner"}), 403
+
+    data = request.get_json() or {}
+    status = str(data.get("status") or "").strip()
+    raw_ids = data.get("id_kuisoner_list") or []
+
+    if status not in ["belum_dibuka", "dibuka", "ditutup", "selesai"]:
+        return jsonify({"message": "Status tidak valid"}), 400
+
+    id_kuisoner_list = []
+    for value in raw_ids:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed not in id_kuisoner_list:
+            id_kuisoner_list.append(parsed)
+
+    if not id_kuisoner_list:
+        return jsonify({"message": "Daftar kuisoner tidak tersedia"}), 400
+
+    rows = Kuisoner.query.filter(Kuisoner.id_kuisoner.in_(id_kuisoner_list)).all()
+    now = datetime.utcnow()
+
+    try:
+        for kuisoner in rows:
+            kuisoner.status = status
+            if status == "dibuka":
+                if not kuisoner.tanggal_dibuka:
+                    kuisoner.tanggal_dibuka = now
+                kuisoner.tanggal_ditutup = None
+            elif status in ["ditutup", "selesai"]:
+                kuisoner.tanggal_ditutup = now
+
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({
+            "message": "Gagal mengubah status kuisoner secara massal",
+            "error": str(exc),
+        }), 500
+
+    return jsonify({
+        "message": f"Status {len(rows)} kuisoner berhasil diperbarui",
+        "jumlah_diperbarui": len(rows),
+        "status": status,
+    }), 200
+
+
 @kuisoner_bp.route("/kuisoner/<int:id_kuisoner>/status", methods=["PUT"])
 @jwt_required()
 def update_status_kuisoner(id_kuisoner):
@@ -352,10 +515,11 @@ def update_status_kuisoner(id_kuisoner):
 
     kuisoner.status = status
 
-    if status == "dibuka" and not kuisoner.tanggal_dibuka:
-        kuisoner.tanggal_dibuka = datetime.utcnow()
-
-    if status in ["ditutup", "selesai"]:
+    if status == "dibuka":
+        if not kuisoner.tanggal_dibuka:
+            kuisoner.tanggal_dibuka = datetime.utcnow()
+        kuisoner.tanggal_ditutup = None
+    elif status in ["ditutup", "selesai"]:
         kuisoner.tanggal_ditutup = datetime.utcnow()
 
     db.session.commit()
@@ -409,6 +573,13 @@ def get_kuisoner_tersedia_murid():
     if not id_murid:
         return jsonify({"message": "id_murid tidak ditemukan di token"}), 400
 
+    murid = Murid.query.get(id_murid)
+    if not murid or not getattr(murid, "id_kelas", None):
+        return jsonify([]), 200
+
+    # Kuisoner yang sudah ditutup/selesai tetap menjadi riwayat pada kelas
+    # murid saat ini. Ketika murid dipromosikan, id_kelas berubah sehingga
+    # kartu kuisoner kelas lama otomatis tidak lagi dikirim.
     rows = db.session.query(
         Kuisoner,
         Jadwal,
@@ -424,10 +595,9 @@ def get_kuisoner_tersedia_murid():
         jadwal_murid, jadwal_murid.c.id_jadwal == Jadwal.id_jadwal
     ).filter(
         jadwal_murid.c.id_murid == id_murid,
-        Kuisoner.status == "dibuka",
-        Jadwal.status == "aktif",
-        Kelas.status == "aktif",
-    ).all()
+        Jadwal.id_kelas == murid.id_kelas,
+        Kuisoner.status.in_(["dibuka", "ditutup", "selesai"]),
+    ).order_by(Kuisoner.id_kuisoner.desc()).all()
 
     hasil = []
     for kuisoner, jadwal, kelas, mapel in rows:

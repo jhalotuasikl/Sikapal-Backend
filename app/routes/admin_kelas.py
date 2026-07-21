@@ -9,7 +9,7 @@ from app.models.mata_pelajaran import MataPelajaran
 from app.models.kelas_mapel import kelas_mapel
 from app.models.periode_akademik import PeriodeAkademik
 from app.utils.jadwal_helper import sinkron_jadwal_murid
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 admin_kelas_bp = Blueprint("admin_kelas", __name__)
 
@@ -189,9 +189,14 @@ def _kelas_payload(k, include_detail=False, include_selesai_detail=False):
         },
     }
 
-    # Selalu kirim jumlah murid aktif agar card daftar kelas tidak perlu
+    # Selalu kirim ringkasan agar card daftar kelas tidak perlu
     # melakukan request detail satu per satu.
     payload["jumlah_murid"] = len(_murid_aktif_kelas_payload(k))
+    payload["jumlah_mapel"] = db.session.execute(
+        select(func.count()).select_from(kelas_mapel).where(
+            kelas_mapel.c.id_kelas == k.id_kelas
+        )
+    ).scalar() or 0
 
     if include_detail:
         jadwal_query = Jadwal.query.filter_by(id_kelas=k.id_kelas)
