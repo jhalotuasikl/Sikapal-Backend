@@ -30,7 +30,9 @@ class MuridTingkat(db.Model):
     # selesai     = riwayat kelas/tahun ajaran lama yang sudah selesai
     # lulus       = murid sudah tamat sekolah
     # pindah      = murid pindah sekolah
-    # tinggal_kelas = murid mengulang pada tingkat yang sama
+    # tinggal_kelas = status riwayat lama saat murid tidak naik;
+    #                  murid tetap memiliki baris baru berstatus aktif pada
+    #                  kelas tingkat yang sama di tahun ajaran terbaru
     status = db.Column(
         db.Enum("aktif", "selesai", "lulus", "pindah", "tinggal_kelas"),
         default="aktif"
