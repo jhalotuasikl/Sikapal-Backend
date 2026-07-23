@@ -86,12 +86,55 @@ def hari_indonesia_lower():
 
 def _filter_riwayat_jadwal_terbaru(rows):
     """
-    Riwayat yang sudah berlalu tetap dipertahankan walaupun admin mengubah hari
-    atau jam jadwal. Detail kelas/mapel/hari/jam tetap mengikuti data jadwal
-    terbaru, sedangkan jadwal yang benar-benar dihapus tetap tidak muncul karena
-    query menggunakan inner join ke tabel Jadwal.
+    Riwayat lama tetap ditampilkan ketika jadwal dipindahkan ke hari terbaru
+    yang belum berlangsung pada minggu berjalan. Setelah waktu selesai jadwal
+    terbaru terlewati, kartu riwayat lama dihapus agar tidak tampil sebagai data
+    ganda.
+
+    Filter hanya diterapkan ketika hari jadwal terbaru berbeda dari hari pada
+    tanggal riwayat. Riwayat normal pada hari yang sama tetap dipertahankan.
     """
-    return list(rows)
+    hari_ke_index = {
+        "senin": 0,
+        "selasa": 1,
+        "rabu": 2,
+        "kamis": 3,
+        "jumat": 4,
+        "jum'at": 4,
+        "sabtu": 5,
+        "minggu": 6,
+    }
+    now = _now_app_naive()
+    hasil = []
+
+    for row in rows:
+        jadwal, _kelas, _mapel, _guru, monitor, _laporan, kehadiran = _unpack_monitoring_row(row)
+        tanggal_riwayat = getattr(kehadiran, "tanggal", None) or getattr(monitor, "tanggal", None)
+        hari_terbaru = str(getattr(jadwal, "hari", "") or "").strip().lower()
+        index_hari_terbaru = hari_ke_index.get(hari_terbaru)
+        jam_selesai = getattr(jadwal, "jam_selesai", None)
+
+        if (
+            tanggal_riwayat is not None
+            and index_hari_terbaru is not None
+            and jam_selesai is not None
+            and tanggal_riwayat.weekday() != index_hari_terbaru
+        ):
+            # Gunakan posisi jadwal terbaru pada minggu berjalan. Selama
+            # jadwal itu belum selesai, riwayat lama masih ditampilkan. Begitu
+            # waktunya terlewati, riwayat lama dengan hari berbeda disembunyikan.
+            awal_minggu = now.date() - timedelta(days=now.weekday())
+            tanggal_jadwal_terbaru = awal_minggu + timedelta(
+                days=index_hari_terbaru
+            )
+            batas_selesai = datetime.combine(tanggal_jadwal_terbaru, jam_selesai)
+
+            if now > batas_selesai:
+                continue
+
+        hasil.append(row)
+
+    return hasil
 
 
 def _fmt_time(value):
