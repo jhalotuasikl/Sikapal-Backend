@@ -10,6 +10,7 @@ from app.models.tingkat import Tingkat
 from app.models.murid_tingkat import MuridTingkat
 from app.models.mata_pelajaran import MataPelajaran
 from app.models.kelas_mapel import kelas_mapel
+from app.models.periode_akademik import PeriodeAkademik
 from app.utils.jadwal_helper import sinkron_jadwal_murid
 
 
@@ -29,9 +30,6 @@ def _guard_admin_promosi():
     return None
 
 
-STATUS_RIWAYAT_LAMA = {"selesai", "tinggal_kelas", "lulus", "pindah"}
-
-
 def _to_int(value):
     try:
         if value is None or value == "":
@@ -48,6 +46,7 @@ def _get_daftar_id_mapel_by_kelas(id_kelas):
 
 
 def _sync_mapel_dan_jadwal(murid, kelas_baru):
+    """Sesuaikan mapel/jadwal murid dengan kelas aktif yang baru."""
     daftar_id_mapel = _get_daftar_id_mapel_by_kelas(kelas_baru.id_kelas)
 
     murid.mapel.clear()
@@ -57,11 +56,19 @@ def _sync_mapel_dan_jadwal(murid, kelas_baru):
         if mapel and mapel not in murid.mapel:
             murid.mapel.append(mapel)
 
-    jumlah_jadwal = sinkron_jadwal_murid(
+    sinkron_jadwal_murid(
         id_murid=murid.id_murid,
         id_kelas=kelas_baru.id_kelas,
         daftar_id_mapel=daftar_id_mapel,
     )
+
+    jumlah_jadwal = 0
+    if daftar_id_mapel:
+        jumlah_jadwal = Jadwal.query.filter(
+            Jadwal.id_kelas == kelas_baru.id_kelas,
+            Jadwal.id_mapel.in_(daftar_id_mapel),
+            Jadwal.status == "aktif",
+        ).count()
 
     return {
         "jumlah_mapel": len(daftar_id_mapel),
@@ -69,51 +76,129 @@ def _sync_mapel_dan_jadwal(murid, kelas_baru):
     }
 
 
+def _nama_kelas_normal(value):
+    return " ".join(str(value or "").strip().lower().split())
 
 
-def _arsipkan_pembelajaran_kelas_lama(id_kelas):
-    """Arsipkan pembelajaran lama setelah proses promosi.
+def _urutan_tingkat(value):
+    text = str(value or "").strip().upper()
+    try:
+        return int(text)
+    except Exception:
+        pass
 
-    Jadwal lama selalu diselesaikan agar mapel/jadwal periode sebelumnya tidak
-    tampil lagi pada halaman aktif. Kelas hanya ikut diselesaikan ketika sudah
-    tidak memiliki murid aktif/tinggal kelas atau murid yang masih terdaftar.
-    Jika masih ada murid yang tidak dipromosikan,
-    kelas tetap aktif sebagai kelas tinggal kelas dan siap diberi jadwal baru.
+    roman = {
+        "I": 1,
+        "II": 2,
+        "III": 3,
+        "IV": 4,
+        "V": 5,
+        "VI": 6,
+        "VII": 7,
+        "VIII": 8,
+        "IX": 9,
+        "X": 10,
+        "XI": 11,
+        "XII": 12,
+    }
+    return roman.get(text)
+
+
+def _cari_atau_buat_kelas_tinggal(kelas_lama, tahun_ajaran_baru):
+    """Gunakan kelas aktif yang sama bila ada, selain itu buat wadah baru.
+
+    Kelas baru hanya menyalin identitas kelas: nama, tingkat, tahun ajaran,
+    dan status. Mapel, guru, serta jadwal tidak disalin agar dapat disiapkan
+    manual oleh admin melalui detail kelas.
     """
-    if not id_kelas:
-        return {"kelas_selesai": False, "masih_ada_murid_aktif": False}
+    kandidat = (
+        Kelas.query
+        .filter(
+            Kelas.id_tingkat == kelas_lama.id_tingkat,
+            Kelas.tahun_ajaran == tahun_ajaran_baru,
+            Kelas.status == "aktif",
+        )
+        .order_by(Kelas.id_kelas.asc())
+        .with_for_update()
+        .all()
+    )
 
-    kelas = Kelas.query.get(id_kelas)
-    if not kelas:
-        return {"kelas_selesai": False, "masih_ada_murid_aktif": False}
+    nama_dicari = _nama_kelas_normal(kelas_lama.nama_kelas)
+    for kelas in kandidat:
+        if _nama_kelas_normal(kelas.nama_kelas) == nama_dicari:
+            return kelas, False
 
-    Jadwal.query.filter_by(id_kelas=id_kelas).update(
+    kelas_baru = Kelas(
+        nama_kelas=str(kelas_lama.nama_kelas or "").strip(),
+        tahun_ajaran=tahun_ajaran_baru,
+        id_tingkat=kelas_lama.id_tingkat,
+        status="aktif",
+    )
+    db.session.add(kelas_baru)
+    db.session.flush()
+    return kelas_baru, True
+
+
+def _tutup_riwayat_aktif_lain(id_murid, kecuali_id=None):
+    query = MuridTingkat.query.filter(
+        MuridTingkat.id_murid == id_murid,
+        MuridTingkat.status == "aktif",
+    )
+    if kecuali_id is not None:
+        query = query.filter(MuridTingkat.id != kecuali_id)
+
+    for riwayat in query.all():
+        riwayat.status = "selesai"
+
+
+def _aktifkan_riwayat_baru(murid, kelas_baru, tahun_ajaran_baru):
+    riwayat = (
+        MuridTingkat.query
+        .filter_by(
+            id_murid=murid.id_murid,
+            id_tingkat=kelas_baru.id_tingkat,
+            id_kelas=kelas_baru.id_kelas,
+            tahun_ajaran=tahun_ajaran_baru,
+        )
+        .order_by(MuridTingkat.id.desc())
+        .first()
+    )
+
+    if riwayat:
+        riwayat.status = "aktif"
+    else:
+        riwayat = MuridTingkat(
+            id_murid=murid.id_murid,
+            id_tingkat=kelas_baru.id_tingkat,
+            id_kelas=kelas_baru.id_kelas,
+            tahun_ajaran=tahun_ajaran_baru,
+            status="aktif",
+        )
+        db.session.add(riwayat)
+
+    return riwayat
+
+
+def _arsipkan_kelas_lama(kelas_lama):
+    """Tutup kelas dan seluruh jadwal lama tanpa menghapus data riwayat."""
+    kelas_lama.status = "selesai"
+    jumlah_jadwal = Jadwal.query.filter_by(id_kelas=kelas_lama.id_kelas).update(
         {"status": "selesai"},
         synchronize_session=False,
     )
 
-    masih_aktif = MuridTingkat.query.filter(
-        MuridTingkat.id_kelas == id_kelas,
-        func.lower(func.trim(MuridTingkat.status)).in_(["aktif", "tinggal_kelas"]),
-    ).first()
+    # Relasi kelas_mapel sengaja dipertahankan. MataPelajaran merupakan master
+    # per tingkat dan tidak memiliki status per kelas; kelas serta jadwal yang
+    # selesai sudah membuat pembelajaran lama tidak tampil pada data aktif,
+    # sementara relasi mapelnya tetap tersedia pada Riwayat Kelas.
+    return {
+        "kelas_selesai": True,
+        "jumlah_jadwal_selesai": jumlah_jadwal,
+        "jumlah_mapel_riwayat": len(
+            _get_daftar_id_mapel_by_kelas(kelas_lama.id_kelas)
+        ),
+    }
 
-    # Murid yang tidak dipilih pada proses promosi tetap memiliki id_kelas lama.
-    # Pemeriksaan langsung ini menjaga kelas tetap aktif juga pada data lama yang
-    # belum memiliki riwayat MuridTingkat yang lengkap.
-    masih_terdaftar_di_kelas = Murid.query.filter_by(id_kelas=id_kelas).first()
-
-    if masih_aktif or masih_terdaftar_di_kelas:
-        if hasattr(kelas, "status"):
-            kelas.status = "aktif"
-        return {
-            "kelas_selesai": False,
-            "masih_ada_murid_aktif": True,
-        }
-
-    if hasattr(kelas, "status"):
-        kelas.status = "selesai"
-
-    return {"kelas_selesai": True, "masih_ada_murid_aktif": False}
 
 def _murid_payload(murid, mt=None):
     kelas = murid.kelas
@@ -286,119 +371,248 @@ def riwayat_murid(id_murid):
 def naik_kelas():
     data = request.json or {}
 
-    raw_ids = data.get("id_murid") or data.get("id_murid_list") or data.get("murid_ids") or []
+    raw_ids = (
+        data.get("id_murid")
+        or data.get("id_murid_list")
+        or data.get("murid_ids")
+        or []
+    )
     if isinstance(raw_ids, int):
         raw_ids = [raw_ids]
 
     id_murid_list = []
     for item in raw_ids:
         item_int = _to_int(item)
-        if item_int is not None:
+        if item_int is not None and item_int not in id_murid_list:
             id_murid_list.append(item_int)
 
-    id_kelas_baru = _to_int(data.get("id_kelas_baru") or data.get("id_kelas"))
-    tahun_ajaran_baru = data.get("tahun_ajaran_baru") or data.get("tahun_ajaran")
-    status_lama = data.get("status_lama") or "selesai"
+    id_kelas_lama = _to_int(
+        data.get("id_kelas_lama")
+        or data.get("id_kelas_asal")
+    )
+    id_kelas_baru = _to_int(
+        data.get("id_kelas_baru")
+        or data.get("id_kelas_tujuan")
+        or data.get("id_kelas")
+    )
 
     if not id_murid_list:
-        return jsonify({"success": False, "message": "Pilih minimal satu murid"}), 400
+        return jsonify({"success": False, "message": "Pilih minimal satu murid yang naik kelas"}), 400
+
+    if not id_kelas_lama:
+        return jsonify({"success": False, "message": "Kelas asal wajib dipilih"}), 400
 
     if not id_kelas_baru:
         return jsonify({"success": False, "message": "Kelas tujuan wajib dipilih"}), 400
 
-    if status_lama not in STATUS_RIWAYAT_LAMA:
+    if id_kelas_lama == id_kelas_baru:
+        return jsonify({"success": False, "message": "Kelas tujuan harus berbeda dari kelas asal"}), 400
+
+    periode_aktif = PeriodeAkademik.aktif()
+    if not periode_aktif:
         return jsonify({
             "success": False,
-            "message": "Status lama tidak valid. Gunakan selesai, tinggal_kelas, lulus, atau pindah."
+            "message": "Periode akademik aktif belum diatur. Atur periode terbaru sebelum memproses kenaikan kelas."
         }), 400
 
-    kelas_baru = Kelas.query.get(id_kelas_baru)
-    if not kelas_baru:
-        return jsonify({"success": False, "message": "Kelas tujuan tidak ditemukan"}), 404
-
+    tahun_ajaran_baru = str(periode_aktif.tahun_ajaran or "").strip()
     if not tahun_ajaran_baru:
-        tahun_ajaran_baru = kelas_baru.tahun_ajaran
-
-    berhasil = []
-    gagal = []
-    peringatan = []
-    kelas_lama_terdampak = set()
+        return jsonify({"success": False, "message": "Tahun ajaran aktif tidak valid"}), 400
 
     try:
-        for id_murid in id_murid_list:
-            murid = Murid.query.get(id_murid)
-            if not murid:
-                gagal.append({"id_murid": id_murid, "error": "Murid tidak ditemukan"})
+        kelas_lama = (
+            Kelas.query
+            .filter_by(id_kelas=id_kelas_lama)
+            .with_for_update()
+            .first()
+        )
+        kelas_baru = (
+            Kelas.query
+            .filter_by(id_kelas=id_kelas_baru)
+            .with_for_update()
+            .first()
+        )
+
+        if not kelas_lama:
+            return jsonify({"success": False, "message": "Kelas asal tidak ditemukan"}), 404
+
+        if not kelas_baru:
+            return jsonify({"success": False, "message": "Kelas tujuan tidak ditemukan"}), 404
+
+        if str(kelas_lama.status or "").strip().lower() != "aktif":
+            return jsonify({"success": False, "message": "Kelas asal sudah selesai dan tidak dapat dipromosikan ulang"}), 400
+
+        if str(kelas_baru.status or "").strip().lower() != "aktif":
+            return jsonify({"success": False, "message": "Kelas tujuan harus berstatus aktif"}), 400
+
+        if str(kelas_lama.tahun_ajaran or "").strip() == tahun_ajaran_baru:
+            return jsonify({
+                "success": False,
+                "message": "Kelas asal harus berasal dari tahun ajaran sebelumnya, bukan tahun ajaran aktif saat ini."
+            }), 400
+
+        if str(kelas_baru.tahun_ajaran or "").strip() != tahun_ajaran_baru:
+            return jsonify({
+                "success": False,
+                "message": f"Kelas tujuan harus mengikuti tahun ajaran aktif {tahun_ajaran_baru}."
+            }), 400
+
+        if kelas_lama.id_tingkat == kelas_baru.id_tingkat:
+            return jsonify({
+                "success": False,
+                "message": "Kelas tujuan harus berada pada tingkat berikutnya, bukan tingkat yang sama."
+            }), 400
+
+        tingkat_lama = Tingkat.query.get(kelas_lama.id_tingkat)
+        tingkat_baru = Tingkat.query.get(kelas_baru.id_tingkat)
+        urutan_lama = _urutan_tingkat(tingkat_lama.pangkat if tingkat_lama else None)
+        urutan_baru = _urutan_tingkat(tingkat_baru.pangkat if tingkat_baru else None)
+        if (
+            urutan_lama is not None
+            and urutan_baru is not None
+            and urutan_baru != urutan_lama + 1
+        ):
+            return jsonify({
+                "success": False,
+                "message": "Kelas tujuan harus tepat satu tingkat di atas kelas asal."
+            }), 400
+
+        anggota_aktif = (
+            db.session.query(MuridTingkat, Murid)
+            .join(Murid, Murid.id_murid == MuridTingkat.id_murid)
+            .filter(
+                MuridTingkat.id_kelas == kelas_lama.id_kelas,
+                MuridTingkat.status == "aktif",
+            )
+            .order_by(Murid.nama_murid.asc())
+            .with_for_update()
+            .all()
+        )
+
+        if not anggota_aktif:
+            return jsonify({
+                "success": False,
+                "message": "Kelas asal tidak memiliki murid aktif yang dapat diproses."
+            }), 400
+
+        seluruh_id = {murid.id_murid for _, murid in anggota_aktif}
+        dipilih_id = set(id_murid_list)
+        id_tidak_valid = sorted(dipilih_id - seluruh_id)
+        if id_tidak_valid:
+            return jsonify({
+                "success": False,
+                "message": "Sebagian murid yang dipilih bukan anggota aktif kelas asal. Muat ulang daftar murid.",
+                "id_murid_tidak_valid": id_tidak_valid,
+            }), 400
+
+        jumlah_tinggal = len(seluruh_id - dipilih_id)
+        kelas_tinggal = None
+        kelas_tinggal_dibuat = False
+
+        if jumlah_tinggal > 0:
+            kelas_tinggal, kelas_tinggal_dibuat = _cari_atau_buat_kelas_tinggal(
+                kelas_lama=kelas_lama,
+                tahun_ajaran_baru=tahun_ajaran_baru,
+            )
+
+        data_naik = []
+        data_tinggal = []
+        peringatan = []
+
+        for riwayat_lama, murid in anggota_aktif:
+            _tutup_riwayat_aktif_lain(
+                id_murid=murid.id_murid,
+                kecuali_id=riwayat_lama.id,
+            )
+
+            if murid.id_murid in dipilih_id:
+                riwayat_lama.status = "selesai"
+                _aktifkan_riwayat_baru(
+                    murid=murid,
+                    kelas_baru=kelas_baru,
+                    tahun_ajaran_baru=tahun_ajaran_baru,
+                )
+                murid.id_kelas = kelas_baru.id_kelas
+                sync_info = _sync_mapel_dan_jadwal(murid, kelas_baru)
+
+                if sync_info["jumlah_mapel"] == 0:
+                    peringatan.append({
+                        "id_murid": murid.id_murid,
+                        "nama_murid": murid.nama_murid,
+                        "message": "Kelas tujuan belum memiliki mata pelajaran. Murid tetap naik kelas, tetapi mapel dan jadwal belum tersinkron.",
+                    })
+
+                data_naik.append({
+                    "id_murid": murid.id_murid,
+                    "nis": murid.nis,
+                    "nama_murid": murid.nama_murid,
+                    "status_riwayat_lama": "selesai",
+                    "id_kelas_baru": kelas_baru.id_kelas,
+                    "kelas_baru": kelas_baru.nama_kelas,
+                    "tahun_ajaran_baru": tahun_ajaran_baru,
+                    **sync_info,
+                })
                 continue
 
-            aktif_list = MuridTingkat.query.filter_by(
-                id_murid=murid.id_murid,
-                status="aktif"
-            ).all()
+            riwayat_lama.status = "tinggal_kelas"
+            _aktifkan_riwayat_baru(
+                murid=murid,
+                kelas_baru=kelas_tinggal,
+                tahun_ajaran_baru=tahun_ajaran_baru,
+            )
+            murid.id_kelas = kelas_tinggal.id_kelas
+            sync_info = _sync_mapel_dan_jadwal(murid, kelas_tinggal)
 
-            # Tutup semua riwayat aktif lama supaya tidak ada dua kelas aktif.
-            for mt_lama in aktif_list:
-                if mt_lama.id_kelas:
-                    kelas_lama_terdampak.add(mt_lama.id_kelas)
-                mt_lama.status = status_lama
-
-            riwayat_tujuan = MuridTingkat.query.filter_by(
-                id_murid=murid.id_murid,
-                id_tingkat=kelas_baru.id_tingkat,
-                id_kelas=kelas_baru.id_kelas,
-                tahun_ajaran=tahun_ajaran_baru,
-            ).first()
-
-            if riwayat_tujuan:
-                riwayat_tujuan.status = "aktif"
-            else:
-                riwayat_tujuan = MuridTingkat(
-                    id_murid=murid.id_murid,
-                    id_tingkat=kelas_baru.id_tingkat,
-                    id_kelas=kelas_baru.id_kelas,
-                    tahun_ajaran=tahun_ajaran_baru,
-                    status="aktif",
-                )
-                db.session.add(riwayat_tujuan)
-
-            murid.id_kelas = kelas_baru.id_kelas
-            sync_info = _sync_mapel_dan_jadwal(murid, kelas_baru)
-
-            if sync_info["jumlah_mapel"] == 0:
-                peringatan.append({
-                    "id_murid": murid.id_murid,
-                    "nama_murid": murid.nama_murid,
-                    "message": "Kelas tujuan belum memiliki mapel. Murid tetap dipromosikan, tetapi mapel/jadwal belum tersinkron."
-                })
-
-            berhasil.append({
+            data_tinggal.append({
                 "id_murid": murid.id_murid,
                 "nis": murid.nis,
                 "nama_murid": murid.nama_murid,
-                "kelas_baru": kelas_baru.nama_kelas,
+                "status_riwayat_lama": "tinggal_kelas",
+                "status_riwayat_baru": "aktif",
+                "id_kelas_baru": kelas_tinggal.id_kelas,
+                "kelas_baru": kelas_tinggal.nama_kelas,
+                "id_tingkat": kelas_tinggal.id_tingkat,
                 "tahun_ajaran_baru": tahun_ajaran_baru,
                 **sync_info,
             })
 
-        hasil_arsip = []
-        for id_kelas_lama in kelas_lama_terdampak:
-            status_arsip = _arsipkan_pembelajaran_kelas_lama(id_kelas_lama)
-            hasil_arsip.append({
-                "id_kelas": id_kelas_lama,
-                **status_arsip,
-            })
-
+        hasil_arsip = _arsipkan_kelas_lama(kelas_lama)
         db.session.commit()
+
+        kelas_tinggal_payload = None
+        if kelas_tinggal:
+            kelas_tinggal_payload = {
+                "id_kelas": kelas_tinggal.id_kelas,
+                "nama_kelas": kelas_tinggal.nama_kelas,
+                "id_tingkat": kelas_tinggal.id_tingkat,
+                "tahun_ajaran": kelas_tinggal.tahun_ajaran,
+                "status": kelas_tinggal.status,
+                "dibuat_baru": kelas_tinggal_dibuat,
+            }
 
         return jsonify({
             "success": True,
-            "message": "Proses kenaikan kelas selesai",
-            "berhasil": len(berhasil),
-            "gagal": len(gagal),
-            "data_berhasil": berhasil,
-            "detail_gagal": gagal,
+            "message": (
+                f"Kenaikan kelas selesai: {len(data_naik)} murid naik kelas dan "
+                f"{len(data_tinggal)} murid tinggal kelas."
+            ),
+            "berhasil": len(data_naik),
+            "gagal": 0,
+            "tinggal_kelas": len(data_tinggal),
+            "data_berhasil": data_naik,
+            "data_tinggal_kelas": data_tinggal,
+            "detail_gagal": [],
             "peringatan": peringatan,
+            "kelas_lama": {
+                "id_kelas": kelas_lama.id_kelas,
+                "nama_kelas": kelas_lama.nama_kelas,
+                "tahun_ajaran": kelas_lama.tahun_ajaran,
+                "status": kelas_lama.status,
+            },
             "hasil_arsip_kelas_lama": hasil_arsip,
+            "kelas_tinggal_kelas": kelas_tinggal_payload,
+            "kelas_tinggal_dibuat": kelas_tinggal_dibuat,
+            "tahun_ajaran_aktif": tahun_ajaran_baru,
         }), 200
 
     except Exception as e:
