@@ -84,11 +84,13 @@ def _user_display_data(user):
     nama = user.username
     identitas = "-"
     id_ref = None
+    profile_status = getattr(user, "status", None) or "aktif"
 
     if role_name == "admin":
         admin = Admin.query.filter_by(id_user=user.id_user).first()
         if admin:
             nama = admin.nama_admin
+            profile_status = getattr(admin, "status", profile_status) or profile_status
             identitas = "Administrator"
             id_ref = admin.id_admin
 
@@ -96,6 +98,7 @@ def _user_display_data(user):
         guru = Guru.query.filter_by(id_user=user.id_user).first()
         if guru:
             nama = guru.nama_guru
+            profile_status = getattr(guru, "status", profile_status) or profile_status
             identitas = guru.nip or "-"
             id_ref = guru.id_guru
 
@@ -120,7 +123,7 @@ def _user_display_data(user):
         "role": role_name,
         "nama": nama or user.username,
         "identitas": identitas,
-        "status": getattr(user, "status", "aktif"),
+        "status": profile_status,
         "must_change_password": _truthy(getattr(user, "must_change_password", False)),
     }
 
@@ -174,6 +177,7 @@ def login():
     no_hp = None
 
     foto_profil_response = user.foto_profil
+    profile_status = getattr(user, "status", None) or "aktif"
 
     if role_name == "admin":
         admin = Admin.query.filter_by(id_user=user.id_user).first()
@@ -181,6 +185,7 @@ def login():
         if admin:
             id_admin = admin.id_admin
             nama_admin = admin.nama_admin
+            profile_status = getattr(admin, "status", profile_status) or profile_status
         else:
             nama_admin = user.username or "Administrator"
 
@@ -206,6 +211,7 @@ def login():
         id_guru = guru.id_guru
         nama_guru = guru.nama_guru
         nip = guru.nip
+        profile_status = getattr(guru, "status", profile_status) or profile_status
         foto_profil_response = user.foto_profil
 
     elif role_name == "orang_tua":
@@ -256,7 +262,7 @@ def login():
         "id_user": user.id_user,
         "username": user.username,
         "role": role_name,
-        "status": getattr(user, "status", None),
+        "status": profile_status,
         "must_change_password": _truthy(getattr(user, "must_change_password", False)),
 
         "id_admin": id_admin,
@@ -379,6 +385,7 @@ def get_profile():
     no_hp = None
 
     foto_profil_response = user.foto_profil
+    profile_status = getattr(user, "status", None) or "aktif"
 
     if role_name == "admin":
         admin = Admin.query.filter_by(id_user=user.id_user).first()
@@ -387,6 +394,7 @@ def get_profile():
             id_admin = admin.id_admin
             nama_admin = admin.nama_admin
             nama = admin.nama_admin
+            profile_status = getattr(admin, "status", profile_status) or profile_status
         else:
             nama_admin = user.username or "Administrator"
             nama = nama_admin
@@ -417,6 +425,7 @@ def get_profile():
             nama = guru.nama_guru
             identitas = guru.nip
             foto_profil_response = user.foto_profil
+            profile_status = getattr(guru, "status", profile_status) or profile_status
 
     elif role_name == "orang_tua":
         orang_tua = OrangTua.query.filter_by(id_user=user.id_user).first()
@@ -451,7 +460,7 @@ def get_profile():
         "id_user": user.id_user,
         "username": user.username,
         "role": role_name,
-        "status": getattr(user, "status", None),
+        "status": profile_status,
         "must_change_password": _truthy(getattr(user, "must_change_password", False)),
 
         "nama": nama,

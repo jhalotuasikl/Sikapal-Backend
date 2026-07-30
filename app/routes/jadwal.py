@@ -923,6 +923,68 @@ def jadwal_by_kelas(id_kelas):
 
 
 # =====================================================
+# ADMIN: SELURUH JADWAL YANG DIAMPU SATU GURU
+# Endpoint: GET /api/admin/guru/<id_guru>/jadwal
+# Jadwal dengan kelas/mapel yang sama dikelompokkan agar tabel admin ringkas.
+# =====================================================
+@jadwal_bp.route("/admin/guru/<int:id_guru>/jadwal", methods=["GET"])
+@jwt_required()
+def admin_get_jadwal_by_guru(id_guru):
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Hanya admin"}), 403
+
+    guru = Guru.query.get_or_404(id_guru)
+
+    rows = (
+        db.session.query(Jadwal, Kelas, MataPelajaran, Tingkat)
+        .join(JadwalGuru, Jadwal.id_jadwal == JadwalGuru.id_jadwal)
+        .join(Kelas, Jadwal.id_kelas == Kelas.id_kelas)
+        .join(MataPelajaran, Jadwal.id_mapel == MataPelajaran.id_mapel)
+        .join(Tingkat, Kelas.id_tingkat == Tingkat.id_tingkat)
+        .filter(
+            JadwalGuru.id_guru == id_guru,
+            _jadwal_kelas_belum_selesai_expr(),
+        )
+        .all()
+    )
+
+    rows = sorted(rows, key=jadwal_sort_key_from_tuple)
+    grouped = {}
+
+    for jadwal, kelas, mapel, tingkat in rows:
+        key = (jadwal.id_kelas, jadwal.id_mapel)
+        if key not in grouped:
+            grouped[key] = {
+                "id_kelas": jadwal.id_kelas,
+                "id_mapel": jadwal.id_mapel,
+                "tingkat": tingkat.pangkat,
+                "nama_kelas": kelas.nama_kelas,
+                "tahun_ajaran": kelas.tahun_ajaran,
+                "nama_mapel": mapel.nama_mapel,
+                "jadwal": [],
+            }
+
+        grouped[key]["jadwal"].append({
+            "id_jadwal": jadwal.id_jadwal,
+            "hari": label_hari(jadwal.hari),
+            "jam_mulai": jadwal.jam_mulai.strftime("%H:%M") if jadwal.jam_mulai else None,
+            "jam_selesai": jadwal.jam_selesai.strftime("%H:%M") if jadwal.jam_selesai else None,
+        })
+
+    return jsonify({
+        "guru": {
+            "id_guru": guru.id_guru,
+            "nama_guru": guru.nama_guru,
+            "nip": guru.nip,
+            "status": getattr(guru, "status", "aktif") or "aktif",
+        },
+        "jumlah_mapel_kelas": len(grouped),
+        "jadwal": list(grouped.values()),
+    }), 200
+
+
+# =====================================================
 # ADMIN: ASSIGN GURU KE JADWAL (OTOMATIS 1 GRUP MAPEL)
 # Endpoint: POST /api/admin/jadwal/<id_jadwal>/guru
 # Body: { "id_guru": 1 }

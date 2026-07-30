@@ -222,6 +222,7 @@ def list_guru():
             "id_guru": g.id_guru,
             "nip": g.nip,
             "nama_guru": g.nama_guru,
+            "status": getattr(g, "status", "aktif") or "aktif",
             "mapel": [
                 {
                     "id_mapel": m.id_mapel,
@@ -246,6 +247,7 @@ def update_guru(id_guru):
             "id_guru": guru.id_guru,
             "nip": guru.nip,
             "nama_guru": guru.nama_guru,
+            "status": getattr(guru, "status", "aktif") or "aktif",
             "id_mapel": [m.id_mapel for m in guru.mapel]
         }), 200
 
