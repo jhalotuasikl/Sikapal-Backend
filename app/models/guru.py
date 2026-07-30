@@ -10,6 +10,12 @@ class Guru(db.Model):
     nama_guru = db.Column(db.String(100), nullable=False)
 
     id_user = db.Column(db.Integer, db.ForeignKey("users.id_user"), nullable=False)
+    status = db.Column(
+        db.Enum("aktif", "tidak aktif", name="enum_guru_status"),
+        nullable=False,
+        default="aktif",
+        server_default="aktif",
+    )
 
     jadwal_guru = db.relationship("JadwalGuru", back_populates="guru")
 

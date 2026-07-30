@@ -12,6 +12,12 @@ class Admin(db.Model):
         nullable=False,
         unique=True,
     )
+    status = db.Column(
+        db.Enum("aktif", "tidak aktif", name="enum_admin_status"),
+        nullable=False,
+        default="aktif",
+        server_default="aktif",
+    )
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
 
     user = db.relationship(
