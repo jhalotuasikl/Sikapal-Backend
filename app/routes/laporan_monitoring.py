@@ -214,32 +214,12 @@ def _jadwal_kelas_selesai(jadwal):
     return _status_text(getattr(kelas, "status", None)) in _STATUS_TIDAK_AKTIF
 
 def _hapus_monitoring_lebih_14_hari():
+    """Kompatibilitas lama: data monitoring tidak lagi dihapus otomatis.
+
+    Tab Riwayat hanya membatasi tampilan ke 14 hari terakhir, sedangkan mode
+    archive dapat mengambil seluruh data lama untuk kebutuhan instansi.
     """
-    Riwayat monitoring hanya disimpan selama 14 hari.
-    Data laporan_monitoring yang lebih lama akan dihapus bersama laporan_mengajar terkait.
-    """
-    cutoff = _today_app() - timedelta(days=14)
-
-    old_ids = [
-        row[0]
-        for row in db.session.query(LaporanMonitoring.id_monitor)
-        .filter(LaporanMonitoring.tanggal < cutoff)
-        .all()
-    ]
-
-    if not old_ids:
-        return 0
-
-    LaporanMengajar.query.filter(
-        LaporanMengajar.id_monitor.in_(old_ids)
-    ).delete(synchronize_session=False)
-
-    LaporanMonitoring.query.filter(
-        LaporanMonitoring.id_monitor.in_(old_ids)
-    ).delete(synchronize_session=False)
-
-    db.session.commit()
-    return len(old_ids)
+    return 0
 
 
 def _laporan_payload(laporan):
@@ -809,7 +789,7 @@ def _sinkron_kehadiran_guru_terjadwal(rows):
 
 
 def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
-    if mode == "history":
+    if mode in ["history", "archive"]:
         q = (
             db.session.query(
                 Jadwal,
@@ -832,12 +812,13 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
                 ),
             )
             .outerjoin(LaporanMengajar, LaporanMengajar.id_monitor == LaporanMonitoring.id_monitor)
+            .filter(KehadiranGuru.status.in_(["Hadir", "Izin", "Sakit", "Alpa"]))
         )
 
-        cutoff_riwayat = _today_app() - timedelta(days=14)
-        q = q.filter(KehadiranGuru.tanggal >= cutoff_riwayat)
-        q = q.filter(_jadwal_kelas_belum_selesai_expr())
-        q = q.filter(KehadiranGuru.status.in_(["Hadir", "Izin", "Sakit", "Alpa"]))
+        if mode == "history":
+            cutoff_riwayat = _today_app() - timedelta(days=14)
+            q = q.filter(KehadiranGuru.tanggal >= cutoff_riwayat)
+            q = q.filter(_jadwal_kelas_belum_selesai_expr())
 
         if tanggal_from:
             try:
@@ -860,7 +841,7 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             Jadwal.jam_mulai.desc(),
             Guru.nama_guru.asc(),
         ).all()
-        return _filter_riwayat_jadwal_terbaru(rows)
+        return _filter_riwayat_jadwal_terbaru(rows) if mode == "history" else rows
 
     today = _today_app()
     hari = hari_indonesia_lower()
@@ -1522,7 +1503,6 @@ def monitoring_admin():
     tanggal_from = request.args.get("from")
     tanggal_to = request.args.get("to")
 
-    _hapus_monitoring_lebih_14_hari()
     data = _query_monitoring_rows(mode, tanggal_from, tanggal_to)
     _sinkron_kehadiran_guru_terjadwal(data)
 
@@ -1615,7 +1595,6 @@ def export_monitoring_admin():
     tanggal_from = request.args.get("from")
     tanggal_to = request.args.get("to")
 
-    _hapus_monitoring_lebih_14_hari()
     data = _query_monitoring_rows(mode, tanggal_from, tanggal_to)
     _sinkron_kehadiran_guru_terjadwal(data)
 
