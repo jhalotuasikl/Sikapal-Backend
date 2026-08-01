@@ -85,6 +85,37 @@ def _jadwal_payload(jadwal):
     }
 
 
+def _current_period():
+    # Master Data wajib mengikuti periode yang benar-benar berstatus aktif.
+    # Periode selesai tidak dipakai sebagai fallback agar badge semester tidak
+    # menampilkan tahun ajaran lama secara keliru.
+    return PeriodeAkademik.aktif()
+
+
+def _period_payload(period):
+    if not period:
+        return None
+
+    semester = _status(getattr(period, "semester", None), "ganjil")
+    available_semesters = ["ganjil"]
+    if semester == "genap":
+        # Ketika semester aktif sudah genap, badge ganjil tetap tersedia
+        # untuk melihat data semester sebelumnya pada tahun ajaran yang sama.
+        available_semesters.append("genap")
+
+    return {
+        "id_periode": period.id_periode,
+        "tahun_ajaran": period.tahun_ajaran,
+        "semester": semester,
+        "semester_label": semester.title(),
+        "tanggal_mulai": period.tanggal_mulai.isoformat() if period.tanggal_mulai else None,
+        "tanggal_selesai": period.tanggal_selesai.isoformat() if period.tanggal_selesai else None,
+        "status": _status(getattr(period, "status", None)),
+        "available_semesters": available_semesters,
+        "label": f"Semester {semester.title()} • TA {period.tahun_ajaran}",
+    }
+
+
 def _master_payload():
     selesai_values = ["selesai", "arsip", "diarsipkan", "nonaktif", "tidak aktif"]
 
@@ -256,6 +287,7 @@ def _master_payload():
     }
 
     return {
+        "period": _period_payload(_current_period()),
         "active": {
             "summary": {key: len(value) for key, value in active_details.items()},
             "details": active_details,
@@ -270,35 +302,86 @@ def _master_payload():
 def _date_range(range_key):
     today = datetime.now().date()
     key = (range_key or "day").strip().lower()
-    semester = None
-    tahun_ajaran = None
+    active = _current_period()
+
+    active_semester = _status(getattr(active, "semester", None), "") if active else None
+    active_ta = _text(getattr(active, "tahun_ajaran", None), "") if active else None
+
+    def clamp_to_active(start, end):
+        if not active:
+            return start, end
+        if active.tanggal_mulai:
+            start = max(start, active.tanggal_mulai)
+        if active.tanggal_selesai:
+            end = min(end, active.tanggal_selesai)
+        if start > end:
+            if active.tanggal_mulai and today < active.tanggal_mulai:
+                start = active.tanggal_mulai
+                end = active.tanggal_mulai
+            elif active.tanggal_selesai:
+                start = active.tanggal_selesai
+                end = active.tanggal_selesai
+            else:
+                start = end
+        return start, end
 
     if key == "week":
-        return today - timedelta(days=6), today, "1 Minggu", semester, tahun_ajaran
+        start, end = clamp_to_active(today - timedelta(days=6), today)
+        return start, end, "1 Minggu", active_semester, active_ta
+
     if key == "month":
-        return today - timedelta(days=29), today, "1 Bulan", semester, tahun_ajaran
+        start, end = clamp_to_active(today - timedelta(days=29), today)
+        return start, end, "1 Bulan", active_semester, active_ta
 
     if key in ("ganjil", "genap"):
-        period = PeriodeAkademik.query.filter_by(semester=key).order_by(
-            PeriodeAkademik.tanggal_mulai.desc(), PeriodeAkademik.id_periode.desc()
-        ).first()
+        # Semester selalu diambil dari tahun ajaran aktif. Ini mencegah
+        # badge Ganjil/Genap mengambil periode dari tahun ajaran lama.
+        if active and key == "genap" and active_semester != "genap":
+            key = active_semester or "ganjil"
+
+        period = None
+        if active_ta:
+            period = (
+                PeriodeAkademik.query
+                .filter_by(tahun_ajaran=active_ta, semester=key)
+                .order_by(PeriodeAkademik.tanggal_mulai.desc(), PeriodeAkademik.id_periode.desc())
+                .first()
+            )
         if period:
-            return period.tanggal_mulai, period.tanggal_selesai, f"Semester {key.title()} • {period.tahun_ajaran}", key, period.tahun_ajaran
+            return (
+                period.tanggal_mulai,
+                period.tanggal_selesai,
+                f"Semester {key.title()} • {period.tahun_ajaran}",
+                key,
+                period.tahun_ajaran,
+            )
+        if active:
+            return (
+                active.tanggal_mulai,
+                active.tanggal_selesai,
+                f"Semester {active_semester.title()} • {active_ta}",
+                active_semester,
+                active_ta,
+            )
         return today, today, f"Semester {key.title()}", key, None
 
     if key == "year":
-        active = PeriodeAkademik.aktif() or PeriodeAkademik.query.order_by(
-            PeriodeAkademik.tanggal_mulai.desc(), PeriodeAkademik.id_periode.desc()
-        ).first()
         if active:
             periods = PeriodeAkademik.query.filter_by(tahun_ajaran=active.tahun_ajaran).all()
             starts = [p.tanggal_mulai for p in periods if p.tanggal_mulai]
             ends = [p.tanggal_selesai for p in periods if p.tanggal_selesai]
             if starts and ends:
-                return min(starts), max(ends), f"1 Tahun Ajaran • {active.tahun_ajaran}", None, active.tahun_ajaran
-        return today - timedelta(days=364), today, "1 Tahun Ajaran", None, None
+                return (
+                    min(starts),
+                    max(ends),
+                    f"1 Tahun Ajaran • {active.tahun_ajaran}",
+                    None,
+                    active.tahun_ajaran,
+                )
+        return today - timedelta(days=364), today, "1 Tahun Ajaran", None, active_ta
 
-    return today, today, "1 Hari", semester, tahun_ajaran
+    start, end = clamp_to_active(today, today)
+    return start, end, "1 Hari", active_semester, active_ta
 
 
 def _count_status(rows, getter):
@@ -318,7 +401,83 @@ def _count_status(rows, getter):
     return result
 
 
-def _chart_payload(counts, source):
+def _compact_trend(points, limit=14):
+    if len(points) <= limit:
+        return points
+    if limit <= 1:
+        return [points[-1]]
+
+    indexes = {round(i * (len(points) - 1) / (limit - 1)) for i in range(limit)}
+    return [point for index, point in enumerate(points) if index in indexes]
+
+
+def _trend_from_status(rows, status_getter, date_getter):
+    buckets = {}
+    for row in rows:
+        row_date = date_getter(row)
+        if not row_date:
+            continue
+        key = row_date.isoformat()
+        counts = buckets.setdefault(
+            key,
+            {"hadir": 0, "izin": 0, "sakit": 0, "alpa": 0, "lainnya": 0},
+        )
+        value = _status(status_getter(row), "lainnya")
+        if value in ("hadir", "selesai", "masuk"):
+            counts["hadir"] += 1
+        elif value in ("izin", "ijin"):
+            counts["izin"] += 1
+        elif value == "sakit":
+            counts["sakit"] += 1
+        elif value in ("alpa", "alpha", "tidak hadir"):
+            counts["alpa"] += 1
+        else:
+            counts["lainnya"] += 1
+
+    points = []
+    for key in sorted(buckets.keys()):
+        counts = buckets[key]
+        total = sum(counts.values())
+        hadir = counts["hadir"]
+        points.append({
+            "date": key,
+            "label": datetime.strptime(key, "%Y-%m-%d").strftime("%d/%m"),
+            "total": total,
+            "hadir": hadir,
+            "tidak_hadir": total - hadir,
+            "persentase_hadir": round((hadir / total * 100), 1) if total else 0.0,
+        })
+    return _compact_trend(points)
+
+
+def _trend_from_reports(rows):
+    buckets = {}
+    for row in rows:
+        monitor = getattr(row, "monitoring", None)
+        row_date = getattr(monitor, "tanggal", None)
+        if not row_date:
+            continue
+        key = row_date.isoformat()
+        bucket = buckets.setdefault(key, {"hadir": 0, "tidak_hadir": 0})
+        bucket["hadir"] += int(getattr(row, "jumlah_hadir", 0) or 0)
+        bucket["tidak_hadir"] += int(getattr(row, "jumlah_tidak_hadir", 0) or 0)
+
+    points = []
+    for key in sorted(buckets.keys()):
+        bucket = buckets[key]
+        total = bucket["hadir"] + bucket["tidak_hadir"]
+        points.append({
+            "date": key,
+            "label": datetime.strptime(key, "%Y-%m-%d").strftime("%d/%m"),
+            "total": total,
+            "hadir": bucket["hadir"],
+            "tidak_hadir": bucket["tidak_hadir"],
+            "persentase_hadir": round((bucket["hadir"] / total * 100), 1) if total else 0.0,
+        })
+    return _compact_trend(points)
+
+
+def _chart_payload(counts, source, trend=None):
     total = sum(counts.values())
     hadir = counts.get("hadir", 0)
     return {
@@ -330,6 +489,7 @@ def _chart_payload(counts, source):
         "lainnya": counts.get("lainnya", 0),
         "persentase_hadir": round((hadir / total * 100), 1) if total else 0.0,
         "source": source,
+        "trend": trend or [],
     }
 
 
@@ -370,8 +530,18 @@ def get_master_data_attendance():
     if not guru_rows and monitor_rows:
         guru_counts = _count_status(monitor_rows, lambda row: row.status)
         guru_source = "Laporan monitoring guru"
+        guru_trend = _trend_from_status(
+            monitor_rows,
+            lambda row: row.status,
+            lambda row: row.tanggal,
+        )
     else:
         guru_source = "Kehadiran guru per jadwal (tersinkron monitoring)"
+        guru_trend = _trend_from_status(
+            guru_rows,
+            lambda row: row.status,
+            lambda row: row.tanggal,
+        )
 
     laporan_rows = (
         db.session.query(LaporanMengajar)
@@ -386,17 +556,25 @@ def get_master_data_attendance():
         murid_counts["hadir"] = laporan_hadir
         murid_counts["alpa"] = laporan_tidak_hadir
         murid_source = "Laporan mengajar (fallback karena input kehadiran murid belum tersedia)"
+        murid_trend = _trend_from_reports(laporan_rows)
     else:
         murid_source = "Input kehadiran murid"
+        murid_trend = _trend_from_status(
+            murid_rows,
+            lambda row: row.status,
+            lambda row: row.tanggal,
+        )
 
+    active = _current_period()
     return jsonify({
         "range": range_key,
         "label": label,
         "from": start.isoformat(),
         "to": end.isoformat(),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "guru": _chart_payload(guru_counts, guru_source),
-        "murid": _chart_payload(murid_counts, murid_source),
+        "period": _period_payload(active),
+        "guru": _chart_payload(guru_counts, guru_source, guru_trend),
+        "murid": _chart_payload(murid_counts, murid_source, murid_trend),
         "sources": {
             "monitoring": monitor_count,
             "laporan_mengajar": len(laporan_rows),
@@ -405,3 +583,4 @@ def get_master_data_attendance():
             "jumlah_tidak_hadir_laporan": laporan_tidak_hadir,
         },
     }), 200
+
