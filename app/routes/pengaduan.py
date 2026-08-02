@@ -10,6 +10,110 @@ from app.models.murid import Murid
 pengaduan_bp = Blueprint("pengaduan", __name__)
 
 
+SUB_KATEGORI_VALID = {
+    "pengaduan": {
+        "akademik": [
+            "Materi pembelajaran sulit dipahami",
+            "Metode mengajar kurang efektif",
+            "Guru tidak masuk atau tidak mengajar",
+            "Tugas terlalu banyak atau tidak sesuai",
+            "Jadwal pembelajaran bermasalah",
+            "Kegiatan praktik tidak terlaksana",
+        ],
+        "absensi": [
+            "Kehadiran tercatat tidak sesuai",
+            "Status hadir berubah menjadi alpa",
+            "Izin atau sakit tidak tercatat",
+            "Absensi belum diinput oleh guru",
+            "Data kehadiran ganda",
+            "Rekap kehadiran tidak sesuai",
+        ],
+        "nilai": [
+            "Nilai belum dimasukkan",
+            "Nilai tidak sesuai hasil pekerjaan",
+            "Kesalahan input nilai",
+            "Nilai tugas atau ujian tidak lengkap",
+            "Kriteria penilaian tidak jelas",
+            "Nilai tidak dapat dilihat di aplikasi",
+        ],
+        "bullying": [
+            "Bullying verbal atau penghinaan",
+            "Bullying fisik",
+            "Pengucilan atau bullying sosial",
+            "Ancaman atau intimidasi",
+            "Konflik antarsiswa",
+            "Bullying melalui media sosial",
+        ],
+        "fasilitas": [
+            "Ruang kelas rusak atau tidak nyaman",
+            "Toilet dan sanitasi bermasalah",
+            "Peralatan praktik rusak atau kurang",
+            "Komputer atau internet bermasalah",
+            "Kebersihan lingkungan sekolah",
+            "Air, listrik, atau penerangan bermasalah",
+        ],
+        "lainnya": [
+            "Pelayanan administrasi",
+            "Masalah akun atau aplikasi",
+            "Keamanan lingkungan sekolah",
+            "Kegiatan ekstrakurikuler",
+            "Kantin atau konsumsi sekolah",
+            "Pengaduan lainnya",
+        ],
+    },
+    "aspirasi": {
+        "akademik": [
+            "Penambahan metode pembelajaran interaktif",
+            "Penambahan kegiatan praktik",
+            "Program bimbingan belajar",
+            "Penambahan materi atau sumber belajar",
+            "Kelas tambahan atau pendalaman materi",
+            "Pengembangan pembelajaran digital",
+        ],
+        "absensi": [
+            "Pengingat jadwal absensi",
+            "Notifikasi ketika tidak hadir",
+            "Perbaikan tampilan rekap kehadiran",
+            "Pengajuan izin melalui aplikasi",
+            "Konfirmasi absensi oleh siswa",
+            "Rekap kehadiran untuk orang tua",
+        ],
+        "nilai": [
+            "Notifikasi ketika nilai diterbitkan",
+            "Penjelasan rincian komponen nilai",
+            "Fitur pengajuan koreksi nilai",
+            "Grafik perkembangan nilai",
+            "Penambahan penilaian praktik",
+            "Transparansi kriteria penilaian",
+        ],
+        "bullying": [
+            "Program pencegahan bullying",
+            "Layanan konseling siswa",
+            "Kotak laporan rahasia atau anonim",
+            "Kegiatan edukasi antikekerasan",
+            "Program mediasi konflik",
+            "Pendampingan korban bullying",
+        ],
+        "fasilitas": [
+            "Penambahan fasilitas ruang kelas",
+            "Perbaikan toilet dan sanitasi",
+            "Penambahan alat praktik",
+            "Peningkatan jaringan internet",
+            "Penambahan fasilitas olahraga",
+            "Penambahan ruang belajar atau istirahat",
+        ],
+        "lainnya": [
+            "Pengembangan kegiatan ekstrakurikuler",
+            "Peningkatan pelayanan administrasi",
+            "Pengembangan aplikasi sekolah",
+            "Program kebersihan dan lingkungan",
+            "Peningkatan keamanan sekolah",
+            "Aspirasi atau inovasi lainnya",
+        ],
+    },
+}
+
+
 def _to_int(value):
     if value is None:
         return None
@@ -108,6 +212,7 @@ def create_pengaduan():
     jenis_laporan = data.get("jenis_laporan", "pengaduan")
     mode_pelaporan = data.get("mode_pelaporan")
     kategori_pengaduan = data.get("kategori_pengaduan")
+    sub_kategori = str(data.get("sub_kategori") or "").strip()
     isi_pengaduan = data.get("isi_pengaduan")
 
     if not mode_pelaporan:
@@ -115,6 +220,9 @@ def create_pengaduan():
 
     if not kategori_pengaduan:
         return jsonify({"message": "kategori_pengaduan wajib diisi"}), 400
+
+    if not sub_kategori:
+        return jsonify({"message": "sub_kategori wajib diisi"}), 400
 
     if not isi_pengaduan or not str(isi_pengaduan).strip():
         return jsonify({"message": "isi_pengaduan wajib diisi"}), 400
@@ -139,6 +247,13 @@ def create_pengaduan():
     if kategori_pengaduan not in kategori_valid:
         return jsonify({"message": "kategori_pengaduan tidak valid"}), 400
 
+    sub_kategori_valid = SUB_KATEGORI_VALID.get(jenis_laporan, {}).get(
+        kategori_pengaduan,
+        [],
+    )
+    if sub_kategori not in sub_kategori_valid:
+        return jsonify({"message": "sub_kategori tidak sesuai dengan jenis dan kategori laporan"}), 400
+
     pengaduan = Pengaduan(
         id_murid=id_murid,
         id_ortu=id_ortu,
@@ -146,6 +261,7 @@ def create_pengaduan():
         jenis_laporan=jenis_laporan,
         mode_pelaporan=mode_pelaporan,
         kategori_pengaduan=kategori_pengaduan,
+        sub_kategori=sub_kategori,
         isi_pengaduan=isi_pengaduan.strip(),
         status="menunggu"
     )
