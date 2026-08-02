@@ -55,6 +55,10 @@ class Pengaduan(db.Model):
         nullable=False
     )
 
+    # Disimpan sebagai teks agar daftar subkategori dapat berkembang tanpa
+    # mengubah ENUM database. Data lama tetap aman karena kolom nullable.
+    sub_kategori = db.Column(db.String(160), nullable=True)
+
     isi_pengaduan = db.Column(db.Text, nullable=False)
 
     status = db.Column(
@@ -133,6 +137,7 @@ class Pengaduan(db.Model):
             "nama_kelas": nama_kelas,
             "mode_pelaporan": self.mode_pelaporan,
             "kategori_pengaduan": self.kategori_pengaduan,
+            "sub_kategori": self.sub_kategori,
             "isi_pengaduan": self.isi_pengaduan,
             "status": self.status,
             "catatan_admin": self.catatan_admin,
