@@ -50,6 +50,16 @@ def ensure_schema(db):
             """))
             db.session.commit()
 
+
+        # pengaduan.sub_kategori (pilihan dinamis berdasarkan jenis dan kategori)
+        if not _column_exists(db, "pengaduan", "sub_kategori"):
+            db.session.execute(text("""
+                ALTER TABLE pengaduan
+                ADD COLUMN sub_kategori VARCHAR(160) NULL
+                AFTER kategori_pengaduan
+            """))
+            db.session.commit()
+
         # murid_tingkat.status harus mendukung status riwayat tinggal kelas.
         # Perubahan hanya dijalankan pada schema lama yang enum-nya belum lengkap.
         status_type = _column_type(db, "murid_tingkat", "status").lower()
