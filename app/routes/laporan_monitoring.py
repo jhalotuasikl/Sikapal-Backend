@@ -397,7 +397,7 @@ def _absensi_murid_payload(id_jadwal, pertemuan=None):
         status = str(kehadiran.status or "").strip().lower()
         label = _murid_label(murid)
         if status == "hadir":
-            hadir.append(label)
+            hadir.append(f"{label} (Hadir)")
         else:
             status_label = kehadiran.status or "Alpa"
             tidak_hadir.append(f"{label} ({status_label})")
@@ -405,8 +405,8 @@ def _absensi_murid_payload(id_jadwal, pertemuan=None):
     base_payload.update({
         "jumlah_hadir": len(hadir),
         "jumlah_tidak_hadir": len(tidak_hadir),
-        "daftar_hadir": "; ".join(hadir),
-        "daftar_tidak_hadir": "; ".join(tidak_hadir),
+        "daftar_hadir": "\n".join(hadir),
+        "daftar_tidak_hadir": "\n".join(tidak_hadir),
         "data_tersedia": len(latest) > 0,
     })
     return base_payload

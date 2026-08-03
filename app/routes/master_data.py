@@ -307,31 +307,15 @@ def _date_range(range_key):
     active_semester = _status(getattr(active, "semester", None), "") if active else None
     active_ta = _text(getattr(active, "tahun_ajaran", None), "") if active else None
 
-    def clamp_to_active(start, end):
-        if not active:
-            return start, end
-        if active.tanggal_mulai:
-            start = max(start, active.tanggal_mulai)
-        if active.tanggal_selesai:
-            end = min(end, active.tanggal_selesai)
-        if start > end:
-            if active.tanggal_mulai and today < active.tanggal_mulai:
-                start = active.tanggal_mulai
-                end = active.tanggal_mulai
-            elif active.tanggal_selesai:
-                start = active.tanggal_selesai
-                end = active.tanggal_selesai
-            else:
-                start = end
-        return start, end
-
     if key == "week":
-        start, end = clamp_to_active(today - timedelta(days=6), today)
-        return start, end, "1 Minggu", active_semester, active_ta
+        # Rentang harian mengikuti tanggal input nyata, sedangkan semester dan
+        # tahun ajaran tetap mengikuti periode aktif. Ini membuat input yang
+        # dilakukan hari ini tetap tampil walau tanggal periode disiapkan lebih
+        # awal/akhir untuk kebutuhan tahun ajaran berikutnya.
+        return today - timedelta(days=6), today, "1 Minggu", active_semester, active_ta
 
     if key == "month":
-        start, end = clamp_to_active(today - timedelta(days=29), today)
-        return start, end, "1 Bulan", active_semester, active_ta
+        return today - timedelta(days=29), today, "1 Bulan", active_semester, active_ta
 
     if key in ("ganjil", "genap"):
         # Semester selalu diambil dari tahun ajaran aktif. Ini mencegah
@@ -380,8 +364,7 @@ def _date_range(range_key):
                 )
         return today - timedelta(days=364), today, "1 Tahun Ajaran", None, active_ta
 
-    start, end = clamp_to_active(today, today)
-    return start, end, "1 Hari", active_semester, active_ta
+    return today, today, "1 Hari", active_semester, active_ta
 
 
 def _count_status(rows, getter):
@@ -511,10 +494,17 @@ def get_master_data_attendance():
     ).all()
     guru_counts = _count_status(guru_rows, lambda row: row.status)
 
-    murid_query = KehadiranMurid.query.filter(
-        KehadiranMurid.tanggal >= start,
-        KehadiranMurid.tanggal <= end,
-    )
+    # Untuk tampilan semester/tahun ajaran, semester dan tahun_ajaran pada
+    # record menjadi acuan utama. Tanggal input tidak dipaksa masuk ke rentang
+    # kalender periode karena admin dapat menyiapkan periode akademik baru dan
+    # langsung melakukan pengujian/input sebelum tanggal mulainya tiba.
+    normalized_range = (range_key or "day").strip().lower()
+    murid_query = KehadiranMurid.query
+    if normalized_range in ("day", "week", "month"):
+        murid_query = murid_query.filter(
+            KehadiranMurid.tanggal >= start,
+            KehadiranMurid.tanggal <= end,
+        )
     if semester:
         murid_query = murid_query.filter(KehadiranMurid.semester == semester)
     if tahun_ajaran:
