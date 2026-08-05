@@ -997,11 +997,16 @@ def admin_assign_guru_to_jadwal(id_jadwal):
     if claims.get("role") != "admin":
         return jsonify({"message": "Hanya admin"}), 403
 
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     id_guru = data.get("id_guru")
 
-    if not id_guru:
+    if id_guru in (None, ""):
         return jsonify({"message": "id_guru wajib"}), 400
+
+    try:
+        id_guru = int(id_guru)
+    except (TypeError, ValueError):
+        return jsonify({"message": "id_guru harus berupa angka"}), 400
 
     jadwal = Jadwal.query.get_or_404(id_jadwal)
     guru = Guru.query.get_or_404(id_guru)
@@ -1012,6 +1017,16 @@ def admin_assign_guru_to_jadwal(id_jadwal):
     jadwal_group = get_jadwal_group(jadwal)
     if not jadwal_group:
         return jsonify({"message": "Grup jadwal tidak ditemukan"}), 404
+
+    id_jadwal_group = [row.id_jadwal for row in jadwal_group]
+    guru_lain = JadwalGuru.query.filter(
+        JadwalGuru.id_jadwal.in_(id_jadwal_group),
+        JadwalGuru.id_guru != id_guru,
+    ).first()
+    if guru_lain:
+        return jsonify({
+            "message": "Tidak dapat memilih lebih dari 1 guru, harap unassign dulu sebelum memilih guru lain"
+        }), 409
 
     bentrok = validate_guru_bentrok(id_guru, jadwal_group)
     if bentrok:
@@ -1071,7 +1086,7 @@ def admin_unassign_guru_from_jadwal(id_jadwal, id_guru):
 
     jadwal = Jadwal.query.get_or_404(id_jadwal)
     if not _jadwal_kelas_aktif_obj(jadwal):
-        return jsonify([]), 200
+        return jsonify({"message": "Jadwal sudah tidak aktif"}), 400
 
     jadwal_group = get_jadwal_group(jadwal)
     id_jadwal_group = [row.id_jadwal for row in jadwal_group]
