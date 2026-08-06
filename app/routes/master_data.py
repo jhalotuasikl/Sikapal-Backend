@@ -19,6 +19,7 @@ from app.models.murid import Murid
 from app.models.murid_tingkat import MuridTingkat
 from app.models.orang_tua_models import OrangTua
 from app.models.periode_akademik import PeriodeAkademik
+from app.models.pengaduan import Pengaduan
 from app.models.tingkat import Tingkat
 from app.models.user import User
 
@@ -461,18 +462,91 @@ def _trend_from_reports(rows):
 
 
 def _chart_payload(counts, source, trend=None):
-    total = sum(counts.values())
-    hadir = counts.get("hadir", 0)
+    hadir = int(counts.get("hadir", 0) or 0)
+    izin = int(counts.get("izin", 0) or 0)
+    sakit = int(counts.get("sakit", 0) or 0)
+    alpa = int(counts.get("alpa", 0) or 0)
+    total_empat_status = hadir + izin + sakit + alpa
+
+    def pct(value):
+        return round((value / total_empat_status * 100), 1) if total_empat_status else 0.0
+
     return {
-        "total": total,
+        "total": total_empat_status,
         "hadir": hadir,
-        "izin": counts.get("izin", 0),
-        "sakit": counts.get("sakit", 0),
-        "alpa": counts.get("alpa", 0),
-        "lainnya": counts.get("lainnya", 0),
-        "persentase_hadir": round((hadir / total * 100), 1) if total else 0.0,
+        "izin": izin,
+        "sakit": sakit,
+        "alpa": alpa,
+        "lainnya": int(counts.get("lainnya", 0) or 0),
+        "persentase_hadir": pct(hadir),
+        "persentase_izin": pct(izin),
+        "persentase_sakit": pct(sakit),
+        "persentase_alpa": pct(alpa),
         "source": source,
         "trend": trend or [],
+    }
+
+
+def _pengaduan_payload(rows):
+    reporter = {
+        "murid": {"pengaduan": 0, "aspirasi": 0},
+        "guru": {"pengaduan": 0, "aspirasi": 0},
+        "orang_tua": {"pengaduan": 0, "aspirasi": 0},
+    }
+    totals = {"pengaduan": 0, "aspirasi": 0}
+    finished = {"pengaduan": 0, "aspirasi": 0}
+    buckets = {}
+
+    for row in rows:
+        jenis = _status(getattr(row, "jenis_laporan", None), "pengaduan")
+        if jenis not in totals:
+            continue
+        tipe = _status(getattr(row, "tipe_pelapor", None), "murid").replace(" ", "_")
+        if tipe in reporter:
+            reporter[tipe][jenis] += 1
+        totals[jenis] += 1
+        if _status(getattr(row, "status", None)) == "selesai":
+            finished[jenis] += 1
+
+        created = getattr(row, "tanggal_pengaduan", None)
+        if not created:
+            continue
+        key = created.date().isoformat() if hasattr(created, "date") else str(created)[:10]
+        bucket = buckets.setdefault(key, {
+            "pengaduan": 0,
+            "aspirasi": 0,
+            "pengaduan_selesai": 0,
+            "aspirasi_selesai": 0,
+        })
+        bucket[jenis] += 1
+        if _status(getattr(row, "status", None)) == "selesai":
+            bucket[f"{jenis}_selesai"] += 1
+
+    trend = []
+    for key in sorted(buckets):
+        item = buckets[key]
+        p_total = item["pengaduan"]
+        a_total = item["aspirasi"]
+        trend.append({
+            "date": key,
+            "label": datetime.strptime(key, "%Y-%m-%d").strftime("%d/%m"),
+            "pengaduan_total": p_total,
+            "aspirasi_total": a_total,
+            "pengaduan_selesai": item["pengaduan_selesai"],
+            "aspirasi_selesai": item["aspirasi_selesai"],
+            "pengaduan_persen_selesai": round(item["pengaduan_selesai"] / p_total * 100, 1) if p_total else 0.0,
+            "aspirasi_persen_selesai": round(item["aspirasi_selesai"] / a_total * 100, 1) if a_total else 0.0,
+        })
+
+    return {
+        "total_pengaduan": totals["pengaduan"],
+        "total_aspirasi": totals["aspirasi"],
+        "selesai_pengaduan": finished["pengaduan"],
+        "selesai_aspirasi": finished["aspirasi"],
+        "persen_selesai_pengaduan": round(finished["pengaduan"] / totals["pengaduan"] * 100, 1) if totals["pengaduan"] else 0.0,
+        "persen_selesai_aspirasi": round(finished["aspirasi"] / totals["aspirasi"] * 100, 1) if totals["aspirasi"] else 0.0,
+        "pelapor": reporter,
+        "trend": _compact_trend(trend),
     }
 
 
@@ -555,6 +629,12 @@ def get_master_data_attendance():
             lambda row: row.tanggal,
         )
 
+    pengaduan_rows = Pengaduan.query.filter(
+        Pengaduan.tanggal_pengaduan >= datetime.combine(start, datetime.min.time()),
+        Pengaduan.tanggal_pengaduan <= datetime.combine(end, datetime.max.time()),
+    ).all()
+    pengaduan_data = _pengaduan_payload(pengaduan_rows)
+
     active = _current_period()
     return jsonify({
         "range": range_key,
@@ -565,12 +645,15 @@ def get_master_data_attendance():
         "period": _period_payload(active),
         "guru": _chart_payload(guru_counts, guru_source, guru_trend),
         "murid": _chart_payload(murid_counts, murid_source, murid_trend),
+        "pengaduan_aspirasi": pengaduan_data,
         "sources": {
             "monitoring": monitor_count,
             "laporan_mengajar": len(laporan_rows),
             "input_kehadiran_murid": len(murid_rows),
             "jumlah_hadir_laporan": laporan_hadir,
             "jumlah_tidak_hadir_laporan": laporan_tidak_hadir,
+            "total_pengaduan": pengaduan_data["total_pengaduan"],
+            "total_aspirasi": pengaduan_data["total_aspirasi"],
         },
     }), 200
 

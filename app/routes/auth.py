@@ -22,6 +22,7 @@ from werkzeug.utils import secure_filename
 import os
 import uuid
 import secrets
+import re
 
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
@@ -176,6 +177,13 @@ def login():
     nama_ortu = None
     no_hp = None
 
+    id_kelas = None
+    nama_kelas = None
+    id_tingkat = None
+    tingkat = None
+    tahun_ajaran = None
+    status_anak = None
+
     foto_profil_response = user.foto_profil
     profile_status = getattr(user, "status", None) or "aktif"
 
@@ -200,6 +208,15 @@ def login():
         id_murid = murid.id_murid
         nama_murid = murid.nama_murid
         nis = murid.nis
+        id_kelas = getattr(murid, "id_kelas", None)
+        kelas_murid = getattr(murid, "kelas", None)
+        if kelas_murid is not None:
+            nama_kelas = getattr(kelas_murid, "nama_kelas", None)
+            id_tingkat = getattr(kelas_murid, "id_tingkat", None)
+            tahun_ajaran = getattr(kelas_murid, "tahun_ajaran", None)
+            status_anak = getattr(kelas_murid, "status", None) or "aktif"
+            tingkat_obj = getattr(kelas_murid, "tingkat", None)
+            tingkat = getattr(tingkat_obj, "pangkat", None) if tingkat_obj else None
         foto_profil_response = user.foto_profil
 
     elif role_name == "guru":
@@ -232,6 +249,15 @@ def login():
 
         nama_murid = murid.nama_murid
         nis = murid.nis
+        id_kelas = getattr(murid, "id_kelas", None)
+        kelas_murid = getattr(murid, "kelas", None)
+        if kelas_murid is not None:
+            nama_kelas = getattr(kelas_murid, "nama_kelas", None)
+            id_tingkat = getattr(kelas_murid, "id_tingkat", None)
+            tahun_ajaran = getattr(kelas_murid, "tahun_ajaran", None)
+            status_anak = getattr(kelas_murid, "status", None) or "aktif"
+            tingkat_obj = getattr(kelas_murid, "tingkat", None)
+            tingkat = getattr(tingkat_obj, "pangkat", None) if tingkat_obj else None
 
         user_murid = User.query.get(murid.id_user)
 
@@ -280,6 +306,16 @@ def login():
 
         "nama_ortu": nama_ortu,
         "no_hp": no_hp,
+        "nomor_telepon": no_hp,
+
+        "id_kelas": id_kelas,
+        "nama_kelas": nama_kelas,
+        "kelas": nama_kelas,
+        "id_tingkat": id_tingkat,
+        "tingkat": tingkat,
+        "pangkat": tingkat,
+        "tahun_ajaran": tahun_ajaran,
+        "status_anak": status_anak,
 
         "foto_profil": foto_profil_response,
     }), 200
@@ -389,6 +425,7 @@ def get_profile():
     id_tingkat = None
     tingkat = None
     tahun_ajaran = None
+    status_anak = None
 
     foto_profil_response = user.foto_profil
     profile_status = getattr(user, "status", None) or "aktif"
@@ -425,6 +462,7 @@ def get_profile():
                 nama_kelas = getattr(kelas_murid, "nama_kelas", None)
                 id_tingkat = getattr(kelas_murid, "id_tingkat", None)
                 tahun_ajaran = getattr(kelas_murid, "tahun_ajaran", None)
+                status_anak = getattr(kelas_murid, "status", None) or "aktif"
                 tingkat_obj = getattr(kelas_murid, "tingkat", None)
                 tingkat = getattr(tingkat_obj, "pangkat", None) if tingkat_obj else None
 
@@ -466,6 +504,15 @@ def get_profile():
 
         nama_murid = murid.nama_murid
         nis = murid.nis
+        id_kelas = getattr(murid, "id_kelas", None)
+        kelas_murid = getattr(murid, "kelas", None)
+        if kelas_murid is not None:
+            nama_kelas = getattr(kelas_murid, "nama_kelas", None)
+            id_tingkat = getattr(kelas_murid, "id_tingkat", None)
+            tahun_ajaran = getattr(kelas_murid, "tahun_ajaran", None)
+            status_anak = getattr(kelas_murid, "status", None) or "aktif"
+            tingkat_obj = getattr(kelas_murid, "tingkat", None)
+            tingkat = getattr(tingkat_obj, "pangkat", None) if tingkat_obj else None
 
         user_murid = User.query.get(murid.id_user)
 
@@ -499,6 +546,7 @@ def get_profile():
 
         "nama_ortu": nama_ortu,
         "no_hp": no_hp,
+        "nomor_telepon": no_hp,
 
         "id_kelas": id_kelas,
         "nama_kelas": nama_kelas,
@@ -507,9 +555,66 @@ def get_profile():
         "tingkat": tingkat,
         "pangkat": tingkat,
         "tahun_ajaran": tahun_ajaran,
+        "status_anak": status_anak,
 
         "foto_profil": foto_profil_response,
     }), 200
+
+
+
+# =====================================================
+# ORANG TUA - TAMBAH / PERBARUI NOMOR TELEPON
+# =====================================================
+@auth_bp.route("/orang-tua/nomor-telepon", methods=["PUT", "POST"])
+@jwt_required()
+def update_nomor_telepon_orang_tua():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"message": "Akun tidak ditemukan. Silakan login kembali."}), 404
+
+    if _get_user_role(user) != "orang_tua":
+        return jsonify({"message": "Nomor telepon hanya dapat diperbarui oleh akun orang tua."}), 403
+
+    orang_tua = OrangTua.query.filter_by(id_user=user.id_user).first()
+    if not orang_tua:
+        return jsonify({"message": "Data orang tua tidak ditemukan."}), 404
+
+    data = request.get_json(silent=True) or {}
+    raw_phone = str(data.get("nomor_telepon") or data.get("no_hp") or "").strip()
+    normalized = re.sub(r"[\s\-().]", "", raw_phone)
+
+    if normalized.startswith("0"):
+        normalized = "+62" + normalized[1:]
+    elif normalized.startswith("62"):
+        normalized = "+" + normalized
+    if normalized.startswith("+620"):
+        normalized = "+62" + normalized[4:]
+
+    if not normalized:
+        return jsonify({"message": "Nomor telepon wajib diisi."}), 400
+
+    if not re.fullmatch(r"\+62\d{8,13}", normalized):
+        return jsonify({
+            "message": "Format nomor telepon tidak valid. Gunakan +62 diikuti 8 sampai 13 angka."
+        }), 400
+
+    try:
+        orang_tua.no_hp = normalized
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "message": "Nomor telepon berhasil disimpan.",
+            "no_hp": normalized,
+            "nomor_telepon": normalized,
+        }), 200
+    except Exception:
+        db.session.rollback()
+        return jsonify({
+            "success": False,
+            "message": "Nomor telepon gagal disimpan. Silakan coba kembali."
+        }), 500
 
 
 # =====================================================
