@@ -27,6 +27,37 @@ from app.models.periode_akademik import PeriodeAkademik
 
 monitoring_bp = Blueprint("monitoring", __name__)
 
+_LATE_REPORT_MARKER = "Alasan keterlambatan laporan & keluar:"
+
+
+def _late_report_reason(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    match = re.search(re.escape(_LATE_REPORT_MARKER), text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return text[match.end():].strip()
+
+
+def _without_late_report_reason(value):
+    """Ambil catatan biasa tanpa metadata alasan keterlambatan."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    match = re.search(re.escape(_LATE_REPORT_MARKER), text, flags=re.IGNORECASE)
+    if not match:
+        return text
+    return text[:match.start()].strip()
+
+
+def _merge_late_report_reason(catatan, alasan):
+    base_note = _without_late_report_reason(catatan)
+    late_note = f"{_LATE_REPORT_MARKER} {str(alasan or '').strip()}"
+    return f"{base_note}\n\n{late_note}" if base_note else late_note
+
 
 # =====================================================
 # TIMEZONE HELPER
@@ -36,7 +67,7 @@ monitoring_bp = Blueprint("monitoring", __name__)
 # APP_TIMEZONE=Asia/Jakarta   -> WIB
 # APP_TIMEZONE=Asia/Makassar  -> WITA
 # APP_TIMEZONE=Asia/Jayapura  -> WIT
-_DEFAULT_APP_TIMEZONE = "Asia/Jakarta"
+_DEFAULT_APP_TIMEZONE = "Asia/Jayapura"
 
 
 def _app_timezone():
@@ -1045,6 +1076,10 @@ def laporan_mengajar():
     id_monitor = data.get("id_monitor")
     materi = str(data.get("materi") or "").strip()
     catatan = str(data.get("catatan") or "").strip()
+    is_late_submission = str(data.get("is_late_submission") or "").strip().lower() in [
+        "true", "1", "ya", "yes"
+    ]
+    alasan_keterlambatan = str(data.get("alasan_keterlambatan") or "").strip()
     jumlah_hadir = data.get("jumlah_hadir")
     jumlah_tidak_hadir = data.get("jumlah_tidak_hadir")
     bawa_data_kehadiran = str(data.get("bawa_data_kehadiran") or "").strip().lower() in ["true", "1", "ya", "yes"]
@@ -1057,6 +1092,13 @@ def laporan_mengajar():
 
     if not materi:
         return jsonify({"message": "Materi wajib diisi"}), 400
+
+    if is_late_submission:
+        if len(alasan_keterlambatan) < 5:
+            return jsonify({
+                "message": "Alasan keterlambatan wajib diisi minimal 5 karakter"
+            }), 400
+        catatan = _merge_late_report_reason(catatan, alasan_keterlambatan)
 
     if jumlah_hadir is None or str(jumlah_hadir).strip() == "":
         return jsonify({"message": "Jumlah hadir wajib diisi"}), 400
@@ -1089,6 +1131,27 @@ def laporan_mengajar():
     jadwal = Jadwal.query.get(monitor.id_jadwal)
     if _jadwal_kelas_selesai(jadwal):
         return jsonify({"message": "Jadwal sudah selesai dan tidak aktif lagi"}), 400
+
+    if jadwal and monitor.tanggal and jadwal.jam_selesai:
+        late_deadline = datetime.combine(
+            monitor.tanggal,
+            jadwal.jam_selesai,
+        ) + timedelta(minutes=10)
+        actual_late = _now_app_naive() > late_deadline
+
+        if actual_late and not is_late_submission:
+            return jsonify({
+                "message": (
+                    "Batas laporan dan absen keluar sudah lewat. "
+                    "Gunakan Ajukan Keterlambatan Laporan & Keluar."
+                ),
+                "wajib_keterlambatan": True,
+            }), 409
+
+        if is_late_submission and not actual_late:
+            return jsonify({
+                "message": "Pengajuan keterlambatan hanya tersedia setelah jam selesai + 10 menit"
+            }), 400
 
     if bawa_data_kehadiran:
         if pertemuan_kehadiran is not None and str(pertemuan_kehadiran).strip() != "":
@@ -1245,6 +1308,22 @@ def absen_keluar():
             "message": "Isi laporan mengajar terlebih dahulu sebelum absen keluar",
             "wajib_laporan": True
         }), 400
+
+    if jadwal and monitor.tanggal and jadwal.jam_selesai:
+        late_deadline = datetime.combine(
+            monitor.tanggal,
+            jadwal.jam_selesai,
+        ) + timedelta(minutes=10)
+        if _now_app_naive() > late_deadline:
+            late_reason = _late_report_reason(laporan.catatan)
+            if len(late_reason) < 5:
+                return jsonify({
+                    "message": (
+                        "Batas absen keluar sudah lewat. "
+                        "Ajukan keterlambatan dan isi alasannya terlebih dahulu."
+                    ),
+                    "wajib_keterlambatan": True,
+                }), 400
 
     now_time = _now_app().time()
     monitor.jam_keluar = now_time

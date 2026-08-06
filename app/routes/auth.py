@@ -384,6 +384,12 @@ def get_profile():
     nama_ortu = None
     no_hp = None
 
+    id_kelas = None
+    nama_kelas = None
+    id_tingkat = None
+    tingkat = None
+    tahun_ajaran = None
+
     foto_profil_response = user.foto_profil
     profile_status = getattr(user, "status", None) or "aktif"
 
@@ -409,6 +415,18 @@ def get_profile():
             id_murid = murid.id_murid
             nama_murid = murid.nama_murid
             nis = murid.nis
+            id_kelas = getattr(murid, "id_kelas", None)
+
+            # Akun murid harus mengikuti FK utama murid.id_kelas, bukan hanya
+            # riwayat murid_tingkat, agar kelas aktif pada profil selalu sama
+            # dengan kelas yang sedang dipakai oleh modul jadwal dan akademik.
+            kelas_murid = getattr(murid, "kelas", None)
+            if kelas_murid is not None:
+                nama_kelas = getattr(kelas_murid, "nama_kelas", None)
+                id_tingkat = getattr(kelas_murid, "id_tingkat", None)
+                tahun_ajaran = getattr(kelas_murid, "tahun_ajaran", None)
+                tingkat_obj = getattr(kelas_murid, "tingkat", None)
+                tingkat = getattr(tingkat_obj, "pangkat", None) if tingkat_obj else None
 
             nama = murid.nama_murid
             identitas = murid.nis
@@ -481,6 +499,14 @@ def get_profile():
 
         "nama_ortu": nama_ortu,
         "no_hp": no_hp,
+
+        "id_kelas": id_kelas,
+        "nama_kelas": nama_kelas,
+        "kelas": nama_kelas,
+        "id_tingkat": id_tingkat,
+        "tingkat": tingkat,
+        "pangkat": tingkat,
+        "tahun_ajaran": tahun_ajaran,
 
         "foto_profil": foto_profil_response,
     }), 200

@@ -36,7 +36,7 @@ jadwal_bp = Blueprint("jadwal", __name__)
 # APP_TIMEZONE=Asia/Jakarta   -> WIB
 # APP_TIMEZONE=Asia/Makassar  -> WITA
 # APP_TIMEZONE=Asia/Jayapura  -> WIT
-_DEFAULT_APP_TIMEZONE = "Asia/Jakarta"
+_DEFAULT_APP_TIMEZONE = "Asia/Jayapura"
 
 
 def _app_timezone():
