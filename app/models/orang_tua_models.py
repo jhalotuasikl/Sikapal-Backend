@@ -37,6 +37,7 @@ class OrangTua(db.Model):
             'id_ortu': self.id_ortu,
             'nama_ortu': self.nama_ortu,
             'no_hp': self.no_hp,
+            'nomor_telepon': self.no_hp,
             'id_murid': self.id_murid,
             'id_user': self.id_user,
             'username': self.user.username if self.user else None,

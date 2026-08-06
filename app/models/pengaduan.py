@@ -1,6 +1,9 @@
-from app.extensions import db
+import json
 from datetime import datetime
+
 from sqlalchemy import text
+
+from app.extensions import db
 
 
 class Pengaduan(db.Model):
@@ -8,101 +11,123 @@ class Pengaduan(db.Model):
 
     id_pengaduan = db.Column(db.Integer, primary_key=True)
 
-    # Murid yang terkait dengan pengaduan.
-    # Untuk pengaduan orang tua, kolom ini tetap diisi dengan id anak/murid.
+    # Murid terkait. Untuk laporan orang tua tetap menunjuk anak; untuk guru NULL.
     id_murid = db.Column(
         db.Integer,
         db.ForeignKey("murid.id_murid"),
-        nullable=False
+        nullable=True,
     )
-
-    # Diisi hanya ketika pelapor adalah orang tua.
     id_ortu = db.Column(
         db.Integer,
         db.ForeignKey("orang_tua.id_ortu"),
-        nullable=True
+        nullable=True,
+    )
+    id_guru = db.Column(
+        db.Integer,
+        db.ForeignKey("guru.id_guru"),
+        nullable=True,
     )
 
-    # Pembeda siapa yang mengirim pengaduan.
-    # mode_pelaporan tetap dipakai untuk terbuka/rahasia/anonim.
     tipe_pelapor = db.Column(
-        db.Enum("murid", "orang_tua", name="tipe_pelapor_pengaduan_enum"),
+        db.Enum(
+            "murid",
+            "orang_tua",
+            "guru",
+            name="tipe_pelapor_pengaduan_enum",
+        ),
         nullable=False,
-        default="murid"
+        default="murid",
     )
-
     jenis_laporan = db.Column(
         db.Enum("pengaduan", "aspirasi", name="jenis_laporan_pengaduan_enum"),
         nullable=False,
-        default="pengaduan"
+        default="pengaduan",
     )
-
     mode_pelaporan = db.Column(
         db.Enum("terbuka", "rahasia", "anonim", name="mode_pelaporan_enum"),
-        nullable=False
+        nullable=False,
     )
 
-    kategori_pengaduan = db.Column(
-        db.Enum(
-            "akademik",
-            "absensi",
-            "nilai",
-            "bullying",
-            "fasilitas",
-            "lainnya",
-            name="kategori_pengaduan_enum"
-        ),
-        nullable=False
-    )
-
-    # Disimpan sebagai teks agar daftar subkategori dapat berkembang tanpa
-    # mengubah ENUM database. Data lama tetap aman karena kolom nullable.
+    # String digunakan agar kategori khusus guru bisa berkembang tanpa migrasi ENUM.
+    kategori_pengaduan = db.Column(db.String(120), nullable=False)
     sub_kategori = db.Column(db.String(160), nullable=True)
-
     isi_pengaduan = db.Column(db.Text, nullable=False)
+
+    tujuan_penanganan = db.Column(db.String(180), nullable=True)
+    metadata_pelapor = db.Column(db.Text, nullable=True)
+    lampiran = db.Column(db.String(255), nullable=True)
 
     status = db.Column(
         db.Enum(
             "menunggu",
+            "dikirim",
+            "ditinjau",
             "diproses",
+            "menunggu_informasi",
             "selesai",
             "ditolak",
-            name="status_pengaduan_enum"
+            name="status_pengaduan_enum",
         ),
         nullable=False,
-        default="menunggu"
+        default="menunggu",
     )
 
     catatan_admin = db.Column(db.Text, nullable=True)
-
     tanggal_pengaduan = db.Column(
         db.DateTime,
         nullable=False,
-        default=datetime.utcnow
+        default=datetime.utcnow,
     )
-
-    tanggal_ditindaklanjuti = db.Column(
-        db.DateTime,
-        nullable=True
-    )
+    tanggal_ditindaklanjuti = db.Column(db.DateTime, nullable=True)
 
     murid = db.relationship("Murid", backref="pengaduan_list", lazy=True)
 
-    def _get_nama_ortu(self):
+    def _get_orang_tua(self):
         if not self.id_ortu:
-            return None
-
+            return {}
         try:
             row = db.session.execute(
-                text("SELECT nama_ortu FROM orang_tua WHERE id_ortu = :id_ortu LIMIT 1"),
+                text(
+                    """
+                    SELECT nama_ortu, no_hp
+                    FROM orang_tua
+                    WHERE id_ortu = :id_ortu
+                    LIMIT 1
+                    """
+                ),
                 {"id_ortu": self.id_ortu},
             ).mappings().first()
-            if row:
-                return row.get("nama_ortu")
+            return dict(row) if row else {}
         except Exception:
-            return None
+            return {}
 
-        return None
+    def _get_guru(self):
+        if not self.id_guru:
+            return {}
+        try:
+            row = db.session.execute(
+                text(
+                    """
+                    SELECT nama_guru, nip
+                    FROM guru
+                    WHERE id_guru = :id_guru
+                    LIMIT 1
+                    """
+                ),
+                {"id_guru": self.id_guru},
+            ).mappings().first()
+            return dict(row) if row else {}
+        except Exception:
+            return {}
+
+    def _metadata_dict(self):
+        if not self.metadata_pelapor:
+            return {}
+        try:
+            value = json.loads(self.metadata_pelapor)
+            return value if isinstance(value, dict) else {}
+        except (TypeError, ValueError):
+            return {}
 
     def to_dict(self):
         nama_murid = self.murid.nama_murid if self.murid else None
@@ -113,13 +138,27 @@ class Pengaduan(db.Model):
             if self.murid and self.murid.kelas
             else None
         )
-        nama_ortu = self._get_nama_ortu()
+        tingkat = (
+            self.murid.kelas.tingkat.pangkat
+            if self.murid
+            and self.murid.kelas
+            and getattr(self.murid.kelas, "tingkat", None)
+            else None
+        )
+
+        ortu = self._get_orang_tua()
+        guru = self._get_guru()
+        nama_ortu = ortu.get("nama_ortu")
+        nomor_telepon = ortu.get("no_hp")
+        nama_guru = guru.get("nama_guru")
+        nip = guru.get("nip")
 
         if self.tipe_pelapor == "orang_tua":
-            if nama_murid:
-                pelapor_display = f"Orang tua dari {nama_murid}"
-            else:
-                pelapor_display = "Orang tua"
+            pelapor_display = (
+                f"Orang tua dari {nama_murid}" if nama_murid else "Orang tua"
+            )
+        elif self.tipe_pelapor == "guru":
+            pelapor_display = nama_guru or "Guru"
         else:
             pelapor_display = nama_murid or "Murid"
 
@@ -127,20 +166,37 @@ class Pengaduan(db.Model):
             "id_pengaduan": self.id_pengaduan,
             "id_murid": self.id_murid,
             "id_ortu": self.id_ortu,
+            "id_guru": self.id_guru,
             "tipe_pelapor": self.tipe_pelapor,
             "jenis_laporan": self.jenis_laporan,
             "pelapor_display": pelapor_display,
             "nama_ortu": nama_ortu,
+            "nomor_telepon": nomor_telepon,
+            "no_hp": nomor_telepon,
+            "nama_guru": nama_guru,
+            "nip": nip,
             "nama_murid": nama_murid,
             "nis": nis,
             "id_kelas": id_kelas,
             "nama_kelas": nama_kelas,
+            "tingkat": tingkat,
             "mode_pelaporan": self.mode_pelaporan,
             "kategori_pengaduan": self.kategori_pengaduan,
             "sub_kategori": self.sub_kategori,
             "isi_pengaduan": self.isi_pengaduan,
+            "tujuan_penanganan": self.tujuan_penanganan,
+            "metadata_pelapor": self._metadata_dict(),
+            "lampiran": self.lampiran,
             "status": self.status,
             "catatan_admin": self.catatan_admin,
-            "tanggal_pengaduan": self.tanggal_pengaduan.strftime("%Y-%m-%d %H:%M:%S") if self.tanggal_pengaduan else None,
-            "tanggal_ditindaklanjuti": self.tanggal_ditindaklanjuti.strftime("%Y-%m-%d %H:%M:%S") if self.tanggal_ditindaklanjuti else None,
+            "tanggal_pengaduan": (
+                self.tanggal_pengaduan.strftime("%Y-%m-%d %H:%M:%S")
+                if self.tanggal_pengaduan
+                else None
+            ),
+            "tanggal_ditindaklanjuti": (
+                self.tanggal_ditindaklanjuti.strftime("%Y-%m-%d %H:%M:%S")
+                if self.tanggal_ditindaklanjuti
+                else None
+            ),
         }
