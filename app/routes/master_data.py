@@ -163,6 +163,40 @@ def _master_payload():
         if o.id_murid in active_student_ids and _user_status(o.id_user) == "aktif"
     ]
 
+    # Pengaduan/Aspirasi ikut menjadi bagian Master Data agar relasi dan
+    # persentase memakai sumber yang sama dengan kartu Master Data. Status
+    # terminal masuk riwayat; sisanya tetap dianggap data aktif.
+    pengaduan_semua = Pengaduan.query.order_by(
+        Pengaduan.tanggal_pengaduan.desc(),
+        Pengaduan.id_pengaduan.desc(),
+    ).all()
+    terminal_pengaduan = {"selesai", "ditolak"}
+    pengaduan_aktif = [
+        p for p in pengaduan_semua
+        if _status(getattr(p, "status", None), "menunggu") not in terminal_pengaduan
+    ]
+    pengaduan_riwayat = [
+        p for p in pengaduan_semua
+        if _status(getattr(p, "status", None), "menunggu") in terminal_pengaduan
+    ]
+
+    def pengaduan_rows(items):
+        rows = []
+        for item in items:
+            payload = item.to_dict()
+            rows.append({
+                "id": payload.get("id_pengaduan"),
+                "jenis": payload.get("jenis_laporan"),
+                "pelapor": payload.get("pelapor_display"),
+                "tipe_pelapor": payload.get("tipe_pelapor"),
+                "kategori": payload.get("kategori_pengaduan"),
+                "sub_kategori": payload.get("sub_kategori"),
+                "mode": payload.get("mode_pelaporan"),
+                "status": payload.get("status"),
+                "tanggal": payload.get("tanggal_pengaduan"),
+            })
+        return rows
+
     active_mapel_query = (
         db.session.query(MataPelajaran)
         .join(kelas_mapel, kelas_mapel.c.id_mapel == MataPelajaran.id_mapel)
@@ -226,41 +260,6 @@ def _master_payload():
             })
         return rows
 
-    pengaduan_rows = Pengaduan.query.order_by(Pengaduan.tanggal_pengaduan.desc()).all()
-    history_report_statuses = {"selesai", "ditolak"}
-    pengaduan_aktif = [
-        row for row in pengaduan_rows
-        if _status(getattr(row, "status", None), "menunggu") not in history_report_statuses
-    ]
-    pengaduan_riwayat = [
-        row for row in pengaduan_rows
-        if _status(getattr(row, "status", None), "menunggu") in history_report_statuses
-    ]
-
-    def pengaduan_category_rows(items, status_label):
-        counts = {}
-        for row in items:
-            tipe = _status(getattr(row, "tipe_pelapor", None), "murid").replace(" ", "_")
-            jenis = _status(getattr(row, "jenis_laporan", None), "pengaduan")
-            kategori = _text(getattr(row, "kategori_pengaduan", None), "Lainnya")
-            key = (tipe, jenis, kategori)
-            counts[key] = counts.get(key, 0) + 1
-        return [
-            {
-                "id": f"{tipe}:{jenis}:{kategori}",
-                "nama": kategori,
-                "kategori": kategori,
-                "tipe_pelapor": tipe,
-                "jenis_laporan": jenis,
-                "total": total,
-                "status": status_label,
-            }
-            for (tipe, jenis, kategori), total in sorted(
-                counts.items(),
-                key=lambda item: (item[0][0], item[0][1], item[0][2].lower()),
-            )
-        ]
-
     active_details = {
         "tingkat": tingkat_rows(tingkat_aktif, kelas_aktif, "aktif"),
         "kelas": [_kelas_payload(k) for k in kelas_aktif],
@@ -301,7 +300,7 @@ def _master_payload():
         ],
         "mata_pelajaran": mapel_rows(mapel_aktif, "aktif", aktif_kelas_ids),
         "jadwal": [_jadwal_payload(j) for j in jadwal_aktif],
-        "pengaduan_aspirasi": pengaduan_category_rows(pengaduan_aktif, "aktif"),
+        "pengaduan_aspirasi": pengaduan_rows(pengaduan_aktif),
     }
 
     history_details = {
@@ -321,22 +320,17 @@ def _master_payload():
         ],
         "mata_pelajaran": mapel_rows(mapel_riwayat, "selesai", riwayat_kelas_ids),
         "jadwal": [_jadwal_payload(j) for j in jadwal_riwayat],
-        "pengaduan_aspirasi": pengaduan_category_rows(pengaduan_riwayat, "selesai"),
+        "pengaduan_aspirasi": pengaduan_rows(pengaduan_riwayat),
     }
-
-    active_summary = {key: len(value) for key, value in active_details.items()}
-    history_summary = {key: len(value) for key, value in history_details.items()}
-    active_summary["pengaduan_aspirasi"] = len(pengaduan_aktif)
-    history_summary["pengaduan_aspirasi"] = len(pengaduan_riwayat)
 
     return {
         "period": _period_payload(_current_period()),
         "active": {
-            "summary": active_summary,
+            "summary": {key: len(value) for key, value in active_details.items()},
             "details": active_details,
         },
         "history": {
-            "summary": history_summary,
+            "summary": {key: len(value) for key, value in history_details.items()},
             "details": history_details,
         },
     }
@@ -537,7 +531,6 @@ def _pengaduan_payload(rows):
     }
     totals = {"pengaduan": 0, "aspirasi": 0}
     finished = {"pengaduan": 0, "aspirasi": 0}
-    category_counts = {}
     buckets = {}
 
     for row in rows:
@@ -548,9 +541,6 @@ def _pengaduan_payload(rows):
         if tipe in reporter:
             reporter[tipe][jenis] += 1
         totals[jenis] += 1
-        kategori = _text(getattr(row, "kategori_pengaduan", None), "Lainnya")
-        category_key = (tipe, jenis, kategori)
-        category_counts[category_key] = category_counts.get(category_key, 0) + 1
         if _status(getattr(row, "status", None)) == "selesai":
             finished[jenis] += 1
 
@@ -592,19 +582,6 @@ def _pengaduan_payload(rows):
         "persen_selesai_pengaduan": round(finished["pengaduan"] / totals["pengaduan"] * 100, 1) if totals["pengaduan"] else 0.0,
         "persen_selesai_aspirasi": round(finished["aspirasi"] / totals["aspirasi"] * 100, 1) if totals["aspirasi"] else 0.0,
         "pelapor": reporter,
-        "kategori": [
-            {
-                "nama": kategori,
-                "kategori": kategori,
-                "tipe_pelapor": tipe,
-                "jenis_laporan": jenis,
-                "total": total,
-                "status": "data",
-            }
-            for (tipe, jenis, kategori), total in sorted(
-                category_counts.items(), key=lambda item: (item[0][0], item[0][1], item[0][2].lower())
-            )
-        ],
         "trend": _compact_trend(trend),
     }
 
