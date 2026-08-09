@@ -17,6 +17,7 @@ from .murid import murid_bp
 from .kuisoner import kuisoner_bp
 from .periode_akademik import periode_akademik_bp
 from .master_data import master_data_bp
+from .user_visual_data import user_visual_data_bp
 
 def register_routes(app):
 
@@ -51,3 +52,4 @@ def register_routes(app):
     app.register_blueprint(kuisoner_bp, url_prefix="/api")
     app.register_blueprint(periode_akademik_bp, url_prefix="/api")
     app.register_blueprint(master_data_bp, url_prefix="/api")
+    app.register_blueprint(user_visual_data_bp, url_prefix="/api")

@@ -8,6 +8,9 @@ from app.extensions import db
 from app.models.guru import Guru
 from app.models.jadwal import Jadwal
 from app.models.jadwal_guru import JadwalGuru
+from app.models.kuisoner import Kuisoner
+from app.models.jawaban_kuisoner import JawabanKuisoner
+from app.models.detail_jawaban_kuisoner import DetailJawabanKuisoner
 from app.models.kehadiran_guru import KehadiranGuru
 from app.models.kehadiran_murid import KehadiranMurid
 from app.models.kelas import Kelas
@@ -227,6 +230,66 @@ def _master_payload():
         )
     ).order_by(Kelas.tahun_ajaran.desc(), Jadwal.hari.asc(), Jadwal.jam_mulai.asc()).all()
 
+    # Kuisoner ikut Master Data. Pemisahan aktif/riwayat mengikuti status
+    # kuisoner sekaligus status jadwal/kelas agar konsisten dengan master data.
+    kuisoner_rows = (
+        db.session.query(Kuisoner, Jadwal, Kelas)
+        .join(Jadwal, Jadwal.id_jadwal == Kuisoner.id_jadwal)
+        .join(Kelas, Kelas.id_kelas == Jadwal.id_kelas)
+        .order_by(Kuisoner.id_kuisoner.desc())
+        .all()
+    )
+    kuisoner_aktif = []
+    kuisoner_riwayat = []
+    for kuisoner, jadwal, kelas in kuisoner_rows:
+        kuis_status = _status(getattr(kuisoner, "status", None), "belum dibuka")
+        jadwal_status = _status(getattr(jadwal, "status", None), "aktif")
+        kelas_status = _status(getattr(kelas, "status", None), "aktif")
+        is_history = (
+            kuis_status in selesai_values
+            or jadwal_status in selesai_values
+            or kelas_status in selesai_values
+        )
+        (kuisoner_riwayat if is_history else kuisoner_aktif).append(kuisoner)
+
+    def kuisoner_guru_rows(items, status_label):
+        if not items:
+            return []
+        kuis_ids = [k.id_kuisoner for k in items]
+        pairs = (
+            db.session.query(Kuisoner.id_kuisoner, JadwalGuru.id_guru, JadwalGuru.id_jadwal)
+            .join(JadwalGuru, JadwalGuru.id_jadwal == Kuisoner.id_jadwal)
+            .filter(Kuisoner.id_kuisoner.in_(kuis_ids))
+            .all()
+        )
+        by_guru = {}
+        for id_kuisoner, id_guru, id_jadwal in pairs:
+            bucket = by_guru.setdefault(id_guru, {"kuisoner": set(), "jadwal": set()})
+            bucket["kuisoner"].add(id_kuisoner)
+            bucket["jadwal"].add(id_jadwal)
+
+        rows = []
+        for id_guru, values in by_guru.items():
+            guru = Guru.query.get(id_guru)
+            ids = list(values["kuisoner"])
+            avg_score = (
+                db.session.query(func.avg(DetailJawabanKuisoner.skor))
+                .join(JawabanKuisoner, JawabanKuisoner.id_jawaban == DetailJawabanKuisoner.id_jawaban)
+                .filter(JawabanKuisoner.id_kuisoner.in_(ids))
+                .scalar()
+            )
+            rows.append({
+                "id": id_guru,
+                "nama": _text(getattr(guru, "nama_guru", None), "Guru"),
+                "nip": _text(getattr(guru, "nip", None)),
+                "jumlah_kuisoner": len(values["kuisoner"]),
+                "jumlah_jadwal": len(values["jadwal"]),
+                "score_rata_rata": round(float(avg_score or 0), 2),
+                "status": status_label,
+            })
+        rows.sort(key=lambda row: row["nama"].lower())
+        return rows
+
     def tingkat_rows(items, kelas_items, badge):
         rows = []
         for t in items:
@@ -300,6 +363,7 @@ def _master_payload():
         ],
         "mata_pelajaran": mapel_rows(mapel_aktif, "aktif", aktif_kelas_ids),
         "jadwal": [_jadwal_payload(j) for j in jadwal_aktif],
+        "kuisoner": kuisoner_guru_rows(kuisoner_aktif, "aktif"),
         "pengaduan_aspirasi": pengaduan_rows(pengaduan_aktif),
     }
 
@@ -320,17 +384,25 @@ def _master_payload():
         ],
         "mata_pelajaran": mapel_rows(mapel_riwayat, "selesai", riwayat_kelas_ids),
         "jadwal": [_jadwal_payload(j) for j in jadwal_riwayat],
+        "kuisoner": kuisoner_guru_rows(kuisoner_riwayat, "selesai"),
         "pengaduan_aspirasi": pengaduan_rows(pengaduan_riwayat),
     }
+
+    active_summary = {key: len(value) for key, value in active_details.items()}
+    history_summary = {key: len(value) for key, value in history_details.items()}
+    # Total kartu kuisoner adalah jumlah kuisoner, sedangkan detailnya sengaja
+    # diringkas per guru agar admin langsung melihat score seluruh jadwal yang diampu.
+    active_summary["kuisoner"] = len(kuisoner_aktif)
+    history_summary["kuisoner"] = len(kuisoner_riwayat)
 
     return {
         "period": _period_payload(_current_period()),
         "active": {
-            "summary": {key: len(value) for key, value in active_details.items()},
+            "summary": active_summary,
             "details": active_details,
         },
         "history": {
-            "summary": {key: len(value) for key, value in history_details.items()},
+            "summary": history_summary,
             "details": history_details,
         },
     }
