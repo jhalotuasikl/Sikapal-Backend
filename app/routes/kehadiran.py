@@ -1,7 +1,7 @@
 # app/routes/kehadiran.py
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
-from datetime import date
+from datetime import date, timedelta
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
@@ -384,6 +384,94 @@ def input_kehadiran():
         }), 409
 
     return jsonify({"message": "Absensi tersimpan"}), 201
+
+
+# =====================================================
+# RINGKASAN KEHADIRAN MURID (HARI INI + 1 MINGGU)
+# Tambahan visualisasi; tidak mengubah alur input/rekap yang sudah ada.
+# =====================================================
+def _ringkasan_status_murid(rows):
+    result = {"hadir": 0, "izin": 0, "sakit": 0, "alpa": 0}
+    for row in rows:
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        if status == "hadir":
+            result["hadir"] += 1
+        elif status in ["izin", "ijin"]:
+            result["izin"] += 1
+        elif status == "sakit":
+            result["sakit"] += 1
+        elif status in ["alpa", "alpha", "tidak hadir"]:
+            result["alpa"] += 1
+    total = sum(result.values())
+    result["total"] = total
+    for key in ["hadir", "izin", "sakit", "alpa"]:
+        result[f"persentase_{key}"] = round(result[key] / total * 100, 1) if total else 0.0
+    return result
+
+
+@kehadiran_bp.route("/murid/kehadiran/ringkasan", methods=["GET"])
+@jwt_required()
+def ringkasan_kehadiran_murid():
+    claims = get_jwt()
+    role = claims.get("role")
+    if role not in ["murid", "orang_tua", "admin", "guru"]:
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    token_id_murid = claims.get("id_murid")
+    query_id_murid = request.args.get("id_murid", type=int)
+    id_murid = token_id_murid if role in ["murid", "orang_tua"] else (query_id_murid or token_id_murid)
+    if not id_murid:
+        return jsonify({"message": "ID murid tidak ditemukan"}), 400
+
+    murid = Murid.query.get(int(id_murid))
+    if not murid:
+        return jsonify({"message": "Murid tidak ditemukan"}), 404
+
+    mt = MuridTingkat.query.filter_by(id_murid=int(id_murid), status="aktif").first()
+    id_kelas = mt.id_kelas if mt else getattr(murid, "id_kelas", None)
+    if not id_kelas:
+        empty = _ringkasan_status_murid([])
+        return jsonify({"hari_ini": empty, "minggu": empty}), 200
+
+    jadwal_rows = (
+        Jadwal.query
+        .join(Kelas, Kelas.id_kelas == Jadwal.id_kelas)
+        .filter(
+            Jadwal.id_kelas == id_kelas,
+            Jadwal.status == "aktif",
+            Kelas.status == "aktif",
+        )
+        .all()
+    )
+    schedule_ids = [j.id_jadwal for j in jadwal_rows]
+    if not schedule_ids:
+        empty = _ringkasan_status_murid([])
+        return jsonify({"hari_ini": empty, "minggu": empty}), 200
+
+    today = date.today()
+    week_start = today - timedelta(days=6)
+    query = KehadiranMurid.query.filter(
+        KehadiranMurid.id_murid == int(id_murid),
+        KehadiranMurid.id_jadwal.in_(schedule_ids),
+        KehadiranMurid.tanggal >= week_start,
+        KehadiranMurid.tanggal <= today,
+    )
+    periode, semester_aktif, tahun_aktif = _periode_aktif_values()
+    if semester_aktif:
+        query = query.filter(KehadiranMurid.semester == _normalisasi_semester_kehadiran(semester_aktif))
+    if tahun_aktif:
+        query = query.filter(KehadiranMurid.tahun_ajaran == tahun_aktif)
+
+    week_rows = query.all()
+    day_rows = [row for row in week_rows if row.tanggal == today]
+    return jsonify({
+        "hari_ini": _ringkasan_status_murid(day_rows),
+        "minggu": _ringkasan_status_murid(week_rows),
+        "periode": {
+            "semester": semester_aktif,
+            "tahun_ajaran": tahun_aktif,
+        },
+    }), 200
 
 
 # =====================================================

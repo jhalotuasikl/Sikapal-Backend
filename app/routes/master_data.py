@@ -603,6 +603,15 @@ def _pengaduan_payload(rows):
     }
     totals = {"pengaduan": 0, "aspirasi": 0}
     finished = {"pengaduan": 0, "aspirasi": 0}
+    status_counts = {
+        "menunggu": 0,
+        "dikirim": 0,
+        "ditinjau": 0,
+        "diproses": 0,
+        "menunggu_informasi": 0,
+        "selesai": 0,
+        "ditolak": 0,
+    }
     buckets = {}
 
     for row in rows:
@@ -613,7 +622,10 @@ def _pengaduan_payload(rows):
         if tipe in reporter:
             reporter[tipe][jenis] += 1
         totals[jenis] += 1
-        if _status(getattr(row, "status", None)) == "selesai":
+        row_status = _status(getattr(row, "status", None), "menunggu").replace(" ", "_")
+        if row_status in status_counts:
+            status_counts[row_status] += 1
+        if row_status == "selesai":
             finished[jenis] += 1
 
         created = getattr(row, "tanggal_pengaduan", None)
@@ -653,6 +665,7 @@ def _pengaduan_payload(rows):
         "selesai_aspirasi": finished["aspirasi"],
         "persen_selesai_pengaduan": round(finished["pengaduan"] / totals["pengaduan"] * 100, 1) if totals["pengaduan"] else 0.0,
         "persen_selesai_aspirasi": round(finished["aspirasi"] / totals["aspirasi"] * 100, 1) if totals["aspirasi"] else 0.0,
+        "status_counts": status_counts,
         "pelapor": reporter,
         "trend": _compact_trend(trend),
     }

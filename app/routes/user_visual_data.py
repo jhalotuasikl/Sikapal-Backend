@@ -24,6 +24,7 @@ from app.models.mengajar import LaporanMengajar
 from app.models.kuisoner import Kuisoner
 from app.models.jawaban_kuisoner import JawabanKuisoner
 from app.models.detail_jawaban_kuisoner import DetailJawabanKuisoner
+from app.models.pengaduan import Pengaduan
 
 
 user_visual_data_bp = Blueprint("user_visual_data", __name__)
@@ -56,6 +57,40 @@ def _status_counts(rows, getter):
     for key in ("hadir", "izin", "sakit", "alpa"):
         result[f"persentase_{key}"] = round(result[key] / total * 100, 1) if total else 0.0
     return result
+
+
+def _complaint_payload(rows):
+    status_counts = {
+        "menunggu": 0,
+        "dikirim": 0,
+        "ditinjau": 0,
+        "diproses": 0,
+        "menunggu_informasi": 0,
+        "selesai": 0,
+        "ditolak": 0,
+    }
+    totals = {"pengaduan": 0, "aspirasi": 0}
+    finished = {"pengaduan": 0, "aspirasi": 0}
+    for row in rows:
+        jenis = _text(getattr(row, "jenis_laporan", None), "pengaduan").lower()
+        if jenis not in totals:
+            continue
+        totals[jenis] += 1
+        status = _text(getattr(row, "status", None), "menunggu").lower().replace(" ", "_")
+        if status in status_counts:
+            status_counts[status] += 1
+        if status == "selesai":
+            finished[jenis] += 1
+
+    return {
+        "total_pengaduan": totals["pengaduan"],
+        "total_aspirasi": totals["aspirasi"],
+        "selesai_pengaduan": finished["pengaduan"],
+        "selesai_aspirasi": finished["aspirasi"],
+        "persen_selesai_pengaduan": round(finished["pengaduan"] / totals["pengaduan"] * 100, 1) if totals["pengaduan"] else 0.0,
+        "persen_selesai_aspirasi": round(finished["aspirasi"] / totals["aspirasi"] * 100, 1) if totals["aspirasi"] else 0.0,
+        "status_counts": status_counts,
+    }
 
 
 def _jadwal_payload(j):
@@ -128,6 +163,12 @@ def _student_data(murid, requested_role="murid", parent=None):
         .scalar() or 0
     ) if answered_ids else 0.0
 
+    if requested_role == "orang_tua" and parent is not None:
+        complaint_rows = Pengaduan.query.filter_by(id_ortu=parent.id_ortu).order_by(Pengaduan.tanggal_pengaduan.desc()).all()
+    else:
+        complaint_rows = Pengaduan.query.filter_by(id_murid=murid.id_murid, tipe_pelapor="murid").order_by(Pengaduan.tanggal_pengaduan.desc()).all()
+    complaints = _complaint_payload(complaint_rows)
+
     attendance = _status_counts(attendance_rows, lambda row: row.status)
     week_start = datetime.now().date() - timedelta(days=6)
     attendance_week = _status_counts(
@@ -180,6 +221,7 @@ def _student_data(murid, requested_role="murid", parent=None):
         "details": details,
         "attendance": attendance,
         "attendance_week": attendance_week,
+        "complaints": complaints,
         "grades": {"total": len(nilai_rows), **grade_counts},
         "questionnaire": {
             "total": len(questionnaire_rows),
@@ -244,6 +286,12 @@ def _teacher_data(guru):
             .scalar() or 0
         )
 
+    complaint_rows = Pengaduan.query.filter_by(
+        id_guru=guru.id_guru,
+        tipe_pelapor="guru",
+    ).order_by(Pengaduan.tanggal_pengaduan.desc()).all()
+    complaints = _complaint_payload(complaint_rows)
+
     attendance = _status_counts(attendance_rows, lambda row: row.status)
     week_start = datetime.now().date() - timedelta(days=6)
     attendance_week = _status_counts(
@@ -292,6 +340,7 @@ def _teacher_data(guru):
         "details": details,
         "attendance": attendance,
         "attendance_week": attendance_week,
+        "complaints": complaints,
         "questionnaire": {"total": len(questionnaire_rows), "score_rata_rata": round(q_avg, 2)},
         "reports": report_periods,
         "latest_reports": [
