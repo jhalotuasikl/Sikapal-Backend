@@ -965,6 +965,75 @@ def get_semua_hasil_kuisoner_admin():
         )
 
     return jsonify(hasil), 200
+
+@kuisoner_bp.route("/admin/kuisoner/hasil/<int:id_kuisoner>", methods=["GET"])
+@jwt_required()
+def detail_hasil_kuisoner_admin(id_kuisoner):
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify({"message": "Hanya admin"}), 403
+
+    kuisoner = Kuisoner.query.get(id_kuisoner)
+    if not kuisoner:
+        return jsonify({"message": "Kuisoner tidak ditemukan"}), 404
+
+    jadwal = Jadwal.query.get(kuisoner.id_jadwal)
+    kelas = Kelas.query.get(jadwal.id_kelas) if jadwal else None
+    mapel = MataPelajaran.query.get(jadwal.id_mapel) if jadwal else None
+    total_murid = jumlah_murid_di_jadwal(kuisoner.id_jadwal)
+    total_pengisi = JawabanKuisoner.query.filter_by(id_kuisoner=id_kuisoner).count()
+
+    avg_total = db.session.query(func.avg(DetailJawabanKuisoner.skor)).join(
+        JawabanKuisoner,
+        JawabanKuisoner.id_jawaban == DetailJawabanKuisoner.id_jawaban,
+    ).filter(JawabanKuisoner.id_kuisoner == id_kuisoner).scalar()
+    avg_total = float(avg_total) if avg_total is not None else 0.0
+    partisipasi = (total_pengisi / total_murid * 100) if total_murid > 0 else 0
+
+    detail_per_pertanyaan = db.session.query(
+        PertanyaanKuisoner.id_pertanyaan,
+        PertanyaanKuisoner.pertanyaan,
+        func.avg(DetailJawabanKuisoner.skor).label("rata_rata"),
+    ).join(
+        DetailJawabanKuisoner,
+        DetailJawabanKuisoner.id_pertanyaan == PertanyaanKuisoner.id_pertanyaan,
+    ).join(
+        JawabanKuisoner,
+        JawabanKuisoner.id_jawaban == DetailJawabanKuisoner.id_jawaban,
+    ).filter(
+        JawabanKuisoner.id_kuisoner == id_kuisoner
+    ).group_by(
+        PertanyaanKuisoner.id_pertanyaan,
+        PertanyaanKuisoner.pertanyaan,
+    ).all()
+
+    id_tingkat, tingkat_text = get_tingkat_info(kelas)
+    return jsonify({
+        "id_kuisoner": kuisoner.id_kuisoner,
+        "id_jadwal": kuisoner.id_jadwal,
+        "id_tingkat": id_tingkat,
+        "tingkat": tingkat_text,
+        "pangkat": tingkat_text,
+        "kelas": getattr(kelas, "nama_kelas", None),
+        "mapel": getattr(mapel, "nama_mapel", None),
+        "semester": kuisoner.semester,
+        "tahun_ajaran": kuisoner.tahun_ajaran,
+        "jumlah_murid": total_murid,
+        "jumlah_pengisi": total_pengisi,
+        "partisipasi_persen": round(partisipasi, 2),
+        "poin_akhir": round(avg_total, 2),
+        "status_hasil": hitung_status(avg_total) if total_pengisi > 0 else "-",
+        "detail_pertanyaan": [
+            {
+                "id_pertanyaan": row.id_pertanyaan,
+                "pertanyaan": row.pertanyaan,
+                "rata_rata": round(float(row.rata_rata or 0), 2),
+                "status": hitung_status(float(row.rata_rata or 0)),
+            }
+            for row in detail_per_pertanyaan
+        ],
+    }), 200
+
 @kuisoner_bp.route("/admin/kuisoner/jadwal", methods=["GET"])
 @jwt_required()
 def get_jadwal_admin_untuk_kuisoner():

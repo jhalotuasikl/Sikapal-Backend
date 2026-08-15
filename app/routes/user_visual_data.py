@@ -25,6 +25,7 @@ from app.models.kuisoner import Kuisoner
 from app.models.jawaban_kuisoner import JawabanKuisoner
 from app.models.detail_jawaban_kuisoner import DetailJawabanKuisoner
 from app.models.pengaduan import Pengaduan
+from app.utils.timezone_utils import school_today, utc_now, timezone_metadata
 
 
 user_visual_data_bp = Blueprint("user_visual_data", __name__)
@@ -170,7 +171,7 @@ def _student_data(murid, requested_role="murid", parent=None):
     complaints = _complaint_payload(complaint_rows)
 
     attendance = _status_counts(attendance_rows, lambda row: row.status)
-    week_start = datetime.now().date() - timedelta(days=6)
+    week_start = school_today() - timedelta(days=6)
     attendance_week = _status_counts(
         [row for row in attendance_rows if row.tanggal and row.tanggal >= week_start],
         lambda row: row.status,
@@ -235,7 +236,8 @@ def _student_data(murid, requested_role="murid", parent=None):
             row for row in details["kehadiran"]
             if row.get("tanggal") and datetime.fromisoformat(row["tanggal"]).date() >= week_start
         ],
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "timezone": timezone_metadata(),
     }
 
 
@@ -293,7 +295,7 @@ def _teacher_data(guru):
     complaints = _complaint_payload(complaint_rows)
 
     attendance = _status_counts(attendance_rows, lambda row: row.status)
-    week_start = datetime.now().date() - timedelta(days=6)
+    week_start = school_today() - timedelta(days=6)
     attendance_week = _status_counts(
         [row for row in attendance_rows if row.tanggal and row.tanggal >= week_start],
         lambda row: row.status,
@@ -325,7 +327,7 @@ def _teacher_data(guru):
     }
     summary = {key: len(value) for key, value in details.items()}
 
-    today = datetime.now().date()
+    today = school_today()
     report_periods = {
         "hari": sum(1 for r in report_rows if r.waktu_input and r.waktu_input.date() == today),
         "minggu": sum(1 for r in report_rows if r.waktu_input and r.waktu_input.date() >= today - timedelta(days=6)),
@@ -351,7 +353,8 @@ def _teacher_data(guru):
             row for row in details["monitoring"]
             if row.get("tanggal") and datetime.fromisoformat(row["tanggal"]).date() >= today - timedelta(days=6)
         ],
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "timezone": timezone_metadata(),
     }
 
 

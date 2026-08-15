@@ -2,8 +2,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-import os
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
@@ -25,30 +23,23 @@ from app.models.mengajar import LaporanMengajar
 from app.models.kuisoner import Kuisoner
 from app.models.murid_mapel import MuridMapel
 from app.models.kelas_mapel import kelas_mapel
+from app.utils.timezone_utils import school_now, school_timezone
 
 jadwal_bp = Blueprint("jadwal", __name__)
 
 
 # =========================
-# helper: timezone aplikasi
+# helper: timezone sekolah
 # =========================
-# Atur dari .env:
-# APP_TIMEZONE=Asia/Jakarta   -> WIB
-# APP_TIMEZONE=Asia/Makassar  -> WITA
-# APP_TIMEZONE=Asia/Jayapura  -> WIT
-_DEFAULT_APP_TIMEZONE = "Asia/Jayapura"
-
-
+# Semua logika jadwal akademik mengikuti zona sekolah (WIT / Asia/Jayapura).
+# UTC tetap menjadi waktu universal; konversi ke waktu lokal pengguna hanya
+# dilakukan pada frontend untuk keperluan tampilan.
 def _app_timezone():
-    tz_name = os.getenv("APP_TIMEZONE", _DEFAULT_APP_TIMEZONE).strip() or _DEFAULT_APP_TIMEZONE
-    try:
-        return ZoneInfo(tz_name)
-    except Exception:
-        return ZoneInfo(_DEFAULT_APP_TIMEZONE)
+    return school_timezone()
 
 
 def _now_app():
-    return datetime.now(_app_timezone())
+    return school_now()
 
 
 # =========================

@@ -13,6 +13,7 @@ from app.models.kelas import Kelas
 from app.models.tingkat import Tingkat
 from app.models.murid_tingkat import MuridTingkat
 from app.models.periode_akademik import PeriodeAkademik
+from app.utils.timezone_utils import school_today
 
 kehadiran_bp = Blueprint("kehadiran", __name__)
 
@@ -323,7 +324,7 @@ def input_kehadiran():
         return jsonify({"message": "Murid bukan di kelas jadwal ini"}), 403
 
     # tanggal default hari ini
-    tgl = date.today()
+    tgl = school_today()
     if tanggal_in:
         try:
             y, m, d = map(int, str(tanggal_in).split("-"))
@@ -448,7 +449,7 @@ def ringkasan_kehadiran_murid():
         empty = _ringkasan_status_murid([])
         return jsonify({"hari_ini": empty, "minggu": empty}), 200
 
-    today = date.today()
+    today = school_today()
     week_start = today - timedelta(days=6)
     query = KehadiranMurid.query.filter(
         KehadiranMurid.id_murid == int(id_murid),
@@ -599,7 +600,7 @@ def get_absensi_by_jadwal_tanggal():
         return jsonify({"message": "id_jadwal wajib"}), 400
 
     tanggal_str = request.args.get("tanggal")
-    tgl = date.today()
+    tgl = school_today()
     if tanggal_str:
         try:
             y, m, d = map(int, tanggal_str.split("-"))

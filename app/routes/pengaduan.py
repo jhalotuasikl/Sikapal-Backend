@@ -117,6 +117,67 @@ SUB_KATEGORI_VALID = {
     },
 }
 
+ORANG_TUA_ANAK_SUB_KATEGORI_VALID = {
+    "pengaduan": {
+        "perkembangan_akademik_anak": [
+            "Anak kesulitan memahami pelajaran",
+            "Nilai atau hasil belajar anak menurun",
+            "Tugas atau beban belajar anak bermasalah",
+            "Anak membutuhkan pendampingan belajar",
+        ],
+        "kehadiran_anak": [
+            "Kehadiran anak tidak sesuai",
+            "Anak sering tidak hadir atau terlambat",
+            "Izin atau sakit anak tidak tercatat",
+            "Rekap kehadiran anak perlu diperiksa",
+        ],
+        "perilaku_disiplin_anak": [
+            "Perubahan perilaku anak di sekolah",
+            "Kedisiplinan anak perlu perhatian",
+            "Anak mengalami masalah mengikuti aturan",
+            "Perlu komunikasi dengan wali kelas atau guru",
+        ],
+        "pergaulan_keamanan_anak": [
+            "Anak mengalami bullying atau intimidasi",
+            "Anak mengalami konflik dengan siswa lain",
+            "Anak merasa tidak aman di lingkungan sekolah",
+            "Pergaulan anak perlu pendampingan",
+        ],
+        "kebutuhan_pendampingan_anak": [
+            "Anak membutuhkan konseling",
+            "Anak membutuhkan pendampingan wali kelas",
+            "Anak mengalami kendala adaptasi di sekolah",
+            "Kondisi anak perlu ditindaklanjuti pihak sekolah",
+        ],
+    },
+    "aspirasi": {
+        "dukungan_akademik_anak": [
+            "Bimbingan belajar untuk anak",
+            "Pendalaman materi untuk anak",
+            "Pendampingan perkembangan nilai anak",
+            "Komunikasi perkembangan akademik anak",
+        ],
+        "pengembangan_minat_anak": [
+            "Pengembangan minat dan bakat anak",
+            "Kegiatan ekstrakurikuler yang sesuai",
+            "Kesempatan mengikuti kegiatan atau lomba",
+            "Pendampingan potensi anak",
+        ],
+        "dukungan_kedisiplinan_anak": [
+            "Pendampingan kedisiplinan anak",
+            "Komunikasi rutin wali kelas dengan orang tua",
+            "Penguatan kebiasaan belajar anak",
+            "Pendampingan tanggung jawab anak",
+        ],
+        "kesejahteraan_anak": [
+            "Peningkatan kenyamanan anak di sekolah",
+            "Program pencegahan bullying",
+            "Layanan konseling untuk anak",
+            "Pendampingan sosial dan emosional anak",
+        ],
+    },
+}
+
 GURU_SUB_KATEGORI_VALID = {
     "pengaduan": {
         "akademik_pembelajaran": [
@@ -407,7 +468,18 @@ def create_pengaduan():
     if len(isi) < 10:
         return jsonify({"message": "Isi laporan minimal 10 karakter agar dapat ditindaklanjuti."}), 400
 
-    pilihan = GURU_SUB_KATEGORI_VALID if tipe == "guru" else SUB_KATEGORI_VALID
+    target_laporan = str(data.get("target_laporan") or "sekolah").strip().lower()
+    if tipe != "orang_tua":
+        target_laporan = "sekolah"
+    if target_laporan not in ["sekolah", "anak"]:
+        return jsonify({"message": "Tujuan laporan harus untuk sekolah atau untuk anak."}), 400
+
+    if tipe == "guru":
+        pilihan = GURU_SUB_KATEGORI_VALID
+    elif tipe == "orang_tua" and target_laporan == "anak":
+        pilihan = ORANG_TUA_ANAK_SUB_KATEGORI_VALID
+    else:
+        pilihan = SUB_KATEGORI_VALID
     sub_valid = pilihan.get(jenis, {}).get(kategori, [])
     if not sub_valid:
         return jsonify({"message": "Kategori tidak sesuai dengan jenis laporan yang dipilih."}), 400
@@ -419,6 +491,8 @@ def create_pengaduan():
         }), 400
 
     metadata = _teacher_metadata(id_guru, data) if tipe == "guru" else {}
+    if tipe == "orang_tua":
+        metadata["target_laporan"] = target_laporan
     item = Pengaduan(
         id_murid=id_murid,
         id_ortu=id_ortu,
@@ -429,7 +503,11 @@ def create_pengaduan():
         kategori_pengaduan=kategori,
         sub_kategori=sub,
         isi_pengaduan=isi,
-        tujuan_penanganan=(TARGET_PENANGANAN.get(kategori) if tipe == "guru" else "Admin Sekolah"),
+        tujuan_penanganan=(
+            TARGET_PENANGANAN.get(kategori)
+            if tipe == "guru"
+            else ("Wali Kelas / Bidang Kesiswaan" if tipe == "orang_tua" and target_laporan == "anak" else "Admin Sekolah")
+        ),
         metadata_pelapor=json.dumps(metadata, ensure_ascii=False) if metadata else None,
         lampiran=str(data.get("lampiran") or "").strip() or None,
         status="dikirim" if tipe == "guru" else "menunggu",

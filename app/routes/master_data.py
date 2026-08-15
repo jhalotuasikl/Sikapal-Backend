@@ -25,6 +25,7 @@ from app.models.periode_akademik import PeriodeAkademik
 from app.models.pengaduan import Pengaduan
 from app.models.tingkat import Tingkat
 from app.models.user import User
+from app.utils.timezone_utils import school_today, utc_now, timezone_metadata
 
 
 master_data_bp = Blueprint("master_data", __name__)
@@ -409,7 +410,7 @@ def _master_payload():
 
 
 def _date_range(range_key):
-    today = datetime.now().date()
+    today = school_today()
     key = (range_key or "day").strip().lower()
     active = _current_period()
 
@@ -762,7 +763,8 @@ def get_master_data_attendance():
         "label": label,
         "from": start.isoformat(),
         "to": end.isoformat(),
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": utc_now().isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "timezone": timezone_metadata(),
         "period": _period_payload(active),
         "guru": _chart_payload(guru_counts, guru_source, guru_trend),
         "murid": _chart_payload(murid_counts, murid_source, murid_trend),

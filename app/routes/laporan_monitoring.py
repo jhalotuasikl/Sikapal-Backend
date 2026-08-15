@@ -2,7 +2,6 @@
 from flask import Blueprint, request, jsonify, send_file, current_app
 from datetime import datetime, timedelta
 from io import BytesIO
-from zoneinfo import ZoneInfo
 import os
 import uuid
 import re
@@ -24,10 +23,14 @@ from app.models.guru import Guru
 from app.models.murid import Murid
 from app.models.kehadiran_murid import KehadiranMurid
 from app.models.periode_akademik import PeriodeAkademik
+from app.utils.timezone_utils import school_now, school_now_naive, school_today, school_timezone
 
 monitoring_bp = Blueprint("monitoring", __name__)
 
 _LATE_REPORT_MARKER = "Alasan keterlambatan laporan & keluar:"
+_LATE_ENTRY_MARKER = "Terlambat Masuk:"
+_LATE_ENTRY_TOLERANCE_MINUTES = 15
+_LATE_EXIT_TOLERANCE_MINUTES = 10
 
 
 def _late_report_reason(value):
@@ -59,37 +62,102 @@ def _merge_late_report_reason(catatan, alasan):
     return f"{base_note}\n\n{late_note}" if base_note else late_note
 
 
+def _late_entry_minutes_from_keterangan(value):
+    text = str(value or "")
+    match = re.search(
+        rf"{re.escape(_LATE_ENTRY_MARKER)}\s*(\d+)\s*menit",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return 0
+    try:
+        return max(0, int(match.group(1)))
+    except Exception:
+        return 0
+
+
+def _late_entry_minutes(jadwal, tanggal_value, jam_masuk):
+    """
+    Hitung keterlambatan masuk tanpa mengubah status utama Hadir/Selesai.
+
+    Guru dianggap "Terlambat Masuk" hanya jika menekan Hadir lebih dari
+    15 menit setelah jam_mulai dan masih sebelum jam_selesai.
+    """
+    if (
+        not jadwal
+        or not tanggal_value
+        or not jam_masuk
+        or not getattr(jadwal, "jam_mulai", None)
+    ):
+        return 0
+
+    masuk_dt = datetime.combine(tanggal_value, jam_masuk)
+    mulai_dt = datetime.combine(tanggal_value, jadwal.jam_mulai)
+
+    if getattr(jadwal, "jam_selesai", None):
+        selesai_dt = datetime.combine(tanggal_value, jadwal.jam_selesai)
+        if masuk_dt >= selesai_dt:
+            return 0
+
+    selisih_detik = (masuk_dt - mulai_dt).total_seconds()
+    if selisih_detik <= (_LATE_ENTRY_TOLERANCE_MINUTES * 60):
+        return 0
+
+    return max(0, int(selisih_detik // 60))
+
+
+def _is_late_exit(jadwal, monitor=None, laporan=None):
+    """
+    Status tambahan "Terlambat Keluar" mengikuti alur keterlambatan
+    laporan/keluar yang sudah ada: setelah jam_selesai + 10 menit.
+    """
+    if not jadwal or not monitor or not monitor.tanggal or not jadwal.jam_selesai:
+        return False
+
+    if not monitor.jam_keluar:
+        return False
+
+    # Alasan keterlambatan yang sudah tersimpan adalah bukti paling kuat bahwa
+    # alur pengajuan keterlambatan memang dijalankan. Label Terlambat Keluar
+    # baru aktif setelah tombol keluar benar-benar ditekan.
+    if laporan and _late_report_reason(getattr(laporan, "catatan", None)):
+        return True
+
+    # Untuk riwayat, jangan menghitung ulang memakai jam jadwal yang mungkin
+    # sudah diedit setelah tanggal tersebut. Data keterlambatan riwayat baru
+    # dianggap valid bila marker alasan keterlambatan memang tersimpan.
+    if monitor.tanggal != _today_app():
+        return False
+
+    batas = datetime.combine(
+        monitor.tanggal,
+        jadwal.jam_selesai,
+    ) + timedelta(minutes=_LATE_EXIT_TOLERANCE_MINUTES)
+    waktu_keluar = datetime.combine(monitor.tanggal, monitor.jam_keluar)
+    return waktu_keluar > batas
+
+
 # =====================================================
 # TIMEZONE HELPER
 # =====================================================
-# Atur zona waktu aplikasi dari .env sesuai lokasi sekolah/instansi.
-# Contoh:
-# APP_TIMEZONE=Asia/Jakarta   -> WIB
-# APP_TIMEZONE=Asia/Makassar  -> WITA
-# APP_TIMEZONE=Asia/Jayapura  -> WIT
-_DEFAULT_APP_TIMEZONE = "Asia/Jayapura"
-
-
+# Monitoring selalu mengikuti waktu sekolah (WIT / Asia/Jayapura), bukan
+# timezone perangkat tester atau timezone OS VPS.
 def _app_timezone():
-    tz_name = os.getenv("APP_TIMEZONE", _DEFAULT_APP_TIMEZONE).strip() or _DEFAULT_APP_TIMEZONE
-    try:
-        return ZoneInfo(tz_name)
-    except Exception:
-        return ZoneInfo(_DEFAULT_APP_TIMEZONE)
+    return school_timezone()
 
 
 def _now_app():
-    return datetime.now(_app_timezone())
+    return school_now()
 
 
 def _now_app_naive():
-    # Database MySQL umumnya menyimpan DATETIME tanpa timezone.
-    # Karena itu timezone lokal aplikasi dibuang sebelum disimpan.
-    return _now_app().replace(tzinfo=None)
+    # Kolom legacy MySQL menyimpan jam sekolah tanpa metadata timezone.
+    return school_now_naive()
 
 
 def _today_app():
-    return _now_app().date()
+    return school_today()
 
 
 # =====================================================
@@ -613,6 +681,28 @@ def _status_kehadiran_manual(kehadiran_guru):
     return kehadiran_guru.status
 
 
+def _bersihkan_keterangan_auto_alpa(value):
+    """
+    Hapus catatan auto-Alpa yang sudah tidak relevan ketika jadwal dipindah/
+    dibuat ke waktu yang belum selesai pada hari berjalan. Catatan lain tetap
+    dipertahankan.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    marker = (
+        "auto alpa setelah jadwal selesai",
+        "menjadi alpa karena jadwal sudah selesai",
+    )
+    parts = [part.strip() for part in text.split(";") if part.strip()]
+    kept = [
+        part for part in parts
+        if not any(part.lower().startswith(prefix) for prefix in marker)
+    ]
+    return "; ".join(kept) or None
+
+
 def _jadwal_sudah_selesai(jadwal, tanggal_value):
     if not jadwal or not jadwal.jam_selesai or not tanggal_value:
         return False
@@ -623,7 +713,7 @@ def _jadwal_sudah_selesai(jadwal, tanggal_value):
     if tanggal_value > today:
         return False
 
-    return _now_app().time() > jadwal.jam_selesai
+    return _now_app().time() >= jadwal.jam_selesai
 
 
 def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None, tanggal_override=None):
@@ -649,7 +739,10 @@ def _status_monitoring(jadwal, monitor=None, laporan=None, kehadiran_guru=None, 
         return manual
 
     if manual == "Alpa":
-        if pengajuan == "ditolak" and not _jadwal_sudah_selesai(jadwal, tanggal_value):
+        # Status Alpa hanya sah setelah jam selesai jadwal terlewati.
+        # Ini juga melindungi jadwal baru/yang dipindah ke waktu mendatang dari
+        # status Alpa lama yang masih tersimpan pada tanggal dan id_jadwal sama.
+        if not _jadwal_sudah_selesai(jadwal, tanggal_value):
             return "Belum Absen"
         return "Alpa"
 
@@ -686,6 +779,23 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None, 
         )
 
     status = _status_monitoring(jadwal, monitor, laporan, kehadiran_guru, tanggal_override=tanggal_value)
+    terlambat_masuk_menit = _late_entry_minutes_from_keterangan(
+        getattr(kehadiran_guru, "keterangan", None) if kehadiran_guru else None
+    )
+    if terlambat_masuk_menit <= 0 and tanggal_value == _today_app():
+        terlambat_masuk_menit = _late_entry_minutes(
+            jadwal,
+            tanggal_value,
+            monitor.jam_masuk if monitor else None,
+        )
+    terlambat_masuk = terlambat_masuk_menit > 0
+    terlambat_keluar = _is_late_exit(jadwal, monitor, laporan)
+
+    status_tambahan = []
+    if terlambat_masuk:
+        status_tambahan.append("Terlambat Masuk")
+    if terlambat_keluar:
+        status_tambahan.append("Terlambat Keluar")
 
     return {
         "id": id_monitor,
@@ -711,6 +821,14 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None, 
         "masuk": masuk,
         "keluar": keluar,
         "status": status,
+        # Status utama tetap Hadir/Selesai. Keterlambatan menjadi metadata
+        # tambahan agar admin dapat membedakan terlambat masuk vs keluar.
+        "terlambat_masuk": terlambat_masuk,
+        "terlambat_masuk_menit": terlambat_masuk_menit,
+        "status_terlambat_masuk": "Terlambat Masuk" if terlambat_masuk else None,
+        "terlambat_keluar": terlambat_keluar,
+        "status_terlambat_keluar": "Terlambat Keluar" if terlambat_keluar else None,
+        "status_tambahan": status_tambahan,
 
         "id_kehadiran_guru": kehadiran_guru.id_kehadiran if kehadiran_guru else None,
         "kehadiran_guru": kehadiran_guru.status if kehadiran_guru else None,
@@ -774,11 +892,24 @@ def _sinkron_kehadiran_guru_terjadwal(rows):
 
         tanggal_value = monitor.tanggal if monitor and monitor.tanggal else _today_app()
         item = kehadiran_row or _get_kehadiran_guru(guru.id_guru, tanggal_value, jadwal.id_jadwal)
+        jadwal_selesai = _jadwal_sudah_selesai(jadwal, tanggal_value)
+
+        # Guard untuk data Alpa lama/stale. Jadwal hari ini yang jam selesainya
+        # belum lewat tidak boleh tampil Alpa hanya karena tabel kehadiran_guru
+        # masih menyimpan hasil auto-Alpa dari konfigurasi jadwal sebelumnya.
+        # Status dikembalikan ke Belum Absen; saat jam selesai benar-benar lewat,
+        # blok sinkron di bawah akan otomatis mengubahnya kembali menjadi Alpa.
+        if item is not None:
+            current = str(item.status or "").strip().lower()
+            if current in ["alpa", "alpha", "tidak hadir", "tidak_hadir"] and not jadwal_selesai:
+                item.status = "Belum Absen"
+                item.keterangan = _bersihkan_keterangan_auto_alpa(item.keterangan)
+                changed = True
 
         if monitor and monitor.jam_masuk:
             desired_status = "Hadir"
             ket = f"Sinkron monitoring hadir - {_jadwal_label(jadwal.id_jadwal)}"
-        elif _jadwal_sudah_selesai(jadwal, tanggal_value):
+        elif jadwal_selesai:
             desired_status = "Alpa"
             ket = f"Auto alpa setelah jadwal selesai - {_jadwal_label(jadwal.id_jadwal)}"
         else:
@@ -884,7 +1015,8 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             MataPelajaran,
             Guru,
             LaporanMonitoring,
-            LaporanMengajar
+            LaporanMengajar,
+            KehadiranGuru,
         )
         .join(JadwalGuru, JadwalGuru.id_jadwal == Jadwal.id_jadwal)
         .join(Guru, Guru.id_guru == JadwalGuru.id_guru)
@@ -894,10 +1026,22 @@ def _query_monitoring_rows(mode="today", tanggal_from=None, tanggal_to=None):
             LaporanMonitoring,
             db.and_(
                 LaporanMonitoring.id_jadwal == Jadwal.id_jadwal,
-                LaporanMonitoring.tanggal == today
+                # id_jadwal dipakai berulang tiap minggu, sehingga tanggal
+                # hari ini wajib menjadi bagian identitas monitoring harian.
+                LaporanMonitoring.tanggal == today,
             )
         )
         .outerjoin(LaporanMengajar, LaporanMengajar.id_monitor == LaporanMonitoring.id_monitor)
+        .outerjoin(
+            KehadiranGuru,
+            db.and_(
+                KehadiranGuru.id_guru == Guru.id_guru,
+                KehadiranGuru.id_jadwal == Jadwal.id_jadwal,
+                # PENTING: status kemarin/minggu lalu tidak boleh ikut pada
+                # /api/admin/monitoring mode hari ini.
+                KehadiranGuru.tanggal == today,
+            ),
+        )
         .filter(
             func.lower(func.trim(Jadwal.hari)) == hari.lower(),
             _jadwal_kelas_belum_selesai_expr(),
@@ -953,28 +1097,68 @@ def absen_masuk():
 
     now_time = _now_app().time()
 
+    # Setelah jam_selesai, tombol Hadir tidak boleh mengubah ketidakhadiran
+    # menjadi Hadir. Jika sampai batas ini belum ada monitoring, status hari
+    # ini untuk jadwal tersebut benar-benar Alpa.
+    if jadwal.jam_selesai and now_time >= jadwal.jam_selesai:
+        existing = _get_kehadiran_guru(id_guru, today, id_jadwal)
+        manual = _status_kehadiran_manual(existing)
+        if manual not in ["Izin", "Sakit"]:
+            _upsert_kehadiran_guru(
+                id_guru=id_guru,
+                tanggal=today,
+                id_jadwal=id_jadwal,
+                status="Alpa",
+                keterangan=(
+                    f"Auto alpa setelah jadwal selesai - "
+                    f"{_jadwal_label(id_jadwal)}"
+                ),
+            )
+            db.session.commit()
+        return jsonify({
+            "message": "Jam jadwal sudah selesai. Kehadiran hari ini tercatat Alpa."
+        }), 409
+
+    terlambat_masuk_menit = _late_entry_minutes(jadwal, today, now_time)
+
     monitor = LaporanMonitoring(
         id_jadwal=id_jadwal,
         tanggal=today,
         jam_masuk=now_time,
+        # Status utama tetap Hadir meskipun masuk terlambat.
         status="Hadir"
     )
 
     db.session.add(monitor)
+
+    keterangan_masuk = (
+        f"Masuk {now_time.strftime('%H:%M:%S')} - {_jadwal_label(id_jadwal)}"
+    )
+    if terlambat_masuk_menit > 0:
+        keterangan_masuk = (
+            f"{_LATE_ENTRY_MARKER} {terlambat_masuk_menit} menit; "
+            f"{keterangan_masuk}"
+        )
 
     _upsert_kehadiran_guru(
         id_guru=id_guru,
         tanggal=today,
         id_jadwal=id_jadwal,
         status="Hadir",
-        keterangan=f"Masuk {now_time.strftime('%H:%M:%S')} - {_jadwal_label(id_jadwal)}"
+        keterangan=keterangan_masuk
     )
 
     db.session.commit()
 
     return jsonify({
         "message": "Absen masuk berhasil",
-        "id_monitor": monitor.id_monitor
+        "id_monitor": monitor.id_monitor,
+        "status": "Hadir",
+        "terlambat_masuk": terlambat_masuk_menit > 0,
+        "terlambat_masuk_menit": terlambat_masuk_menit,
+        "status_tambahan": (
+            ["Terlambat Masuk"] if terlambat_masuk_menit > 0 else []
+        ),
     }), 201
 
 
@@ -1136,7 +1320,7 @@ def laporan_mengajar():
         late_deadline = datetime.combine(
             monitor.tanggal,
             jadwal.jam_selesai,
-        ) + timedelta(minutes=10)
+        ) + timedelta(minutes=_LATE_EXIT_TOLERANCE_MINUTES)
         actual_late = _now_app_naive() > late_deadline
 
         if actual_late and not is_late_submission:
@@ -1313,7 +1497,7 @@ def absen_keluar():
         late_deadline = datetime.combine(
             monitor.tanggal,
             jadwal.jam_selesai,
-        ) + timedelta(minutes=10)
+        ) + timedelta(minutes=_LATE_EXIT_TOLERANCE_MINUTES)
         if _now_app_naive() > late_deadline:
             late_reason = _late_report_reason(laporan.catatan)
             if len(late_reason) < 5:
@@ -1402,12 +1586,35 @@ def status_absen(id_jadwal):
             ) if kehadiran_guru else None,
             "jam_masuk": None,
             "jam_keluar": None,
+            "terlambat_masuk": False,
+            "terlambat_masuk_menit": 0,
+            "status_terlambat_masuk": None,
+            "terlambat_keluar": False,
+            "status_terlambat_keluar": None,
+            "status_tambahan": [],
             "sudah_laporan": False,
             "laporan_mengajar": None
         }), 200
 
     laporan = LaporanMengajar.query.filter_by(id_monitor=data.id_monitor).first()
     status_ui = _status_monitoring(jadwal, data, laporan, kehadiran_guru)
+
+    terlambat_masuk_menit = _late_entry_minutes_from_keterangan(
+        getattr(kehadiran_guru, "keterangan", None) if kehadiran_guru else None
+    )
+    if terlambat_masuk_menit <= 0:
+        terlambat_masuk_menit = _late_entry_minutes(
+            jadwal,
+            today,
+            data.jam_masuk,
+        )
+    terlambat_masuk = terlambat_masuk_menit > 0
+    terlambat_keluar = _is_late_exit(jadwal, data, laporan)
+    status_tambahan = []
+    if terlambat_masuk:
+        status_tambahan.append("Terlambat Masuk")
+    if terlambat_keluar:
+        status_tambahan.append("Terlambat Keluar")
 
     if status_ui == "Hadir":
         status_key = "masuk"
@@ -1435,6 +1642,12 @@ def status_absen(id_jadwal):
         ) if kehadiran_guru else None,
         "jam_masuk": _fmt_time(data.jam_masuk),
         "jam_keluar": _fmt_time(data.jam_keluar),
+        "terlambat_masuk": terlambat_masuk,
+        "terlambat_masuk_menit": terlambat_masuk_menit,
+        "status_terlambat_masuk": "Terlambat Masuk" if terlambat_masuk else None,
+        "terlambat_keluar": terlambat_keluar,
+        "status_terlambat_keluar": "Terlambat Keluar" if terlambat_keluar else None,
+        "status_tambahan": status_tambahan,
         "sudah_laporan": laporan is not None,
         "laporan_mengajar": _laporan_payload(laporan)
     }), 200
