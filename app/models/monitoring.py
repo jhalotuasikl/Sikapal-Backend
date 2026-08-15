@@ -1,5 +1,5 @@
 from app.extensions import db
-from datetime import date
+from app.utils.timezone_utils import school_today
 
 
 class LaporanMonitoring(db.Model):
@@ -9,7 +9,7 @@ class LaporanMonitoring(db.Model):
 
     id_jadwal = db.Column(db.Integer, db.ForeignKey("jadwal.id_jadwal"))
 
-    tanggal = db.Column(db.Date, default=date.today)
+    tanggal = db.Column(db.Date, default=school_today)
 
     jam_masuk = db.Column(db.Time)
     jam_keluar = db.Column(db.Time)

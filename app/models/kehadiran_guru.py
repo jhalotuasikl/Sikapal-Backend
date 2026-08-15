@@ -1,5 +1,5 @@
 from app.extensions import db
-from datetime import date
+from app.utils.timezone_utils import school_today
 
 
 class KehadiranGuru(db.Model):
@@ -27,7 +27,7 @@ class KehadiranGuru(db.Model):
         nullable=True
     )
 
-    tanggal = db.Column(db.Date, nullable=False, default=date.today)
+    tanggal = db.Column(db.Date, nullable=False, default=school_today)
     status = db.Column(db.String(30), nullable=False, default="Hadir")
     keterangan = db.Column(db.String(255), nullable=True)
     alasan = db.Column(db.Text, nullable=True)

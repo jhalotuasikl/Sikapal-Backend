@@ -186,6 +186,7 @@ class Pengaduan(db.Model):
             "isi_pengaduan": self.isi_pengaduan,
             "tujuan_penanganan": self.tujuan_penanganan,
             "metadata_pelapor": self._metadata_dict(),
+            "target_laporan": self._metadata_dict().get("target_laporan", "sekolah"),
             "lampiran": self.lampiran,
             "status": self.status,
             "catatan_admin": self.catatan_admin,

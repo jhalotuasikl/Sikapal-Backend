@@ -1,6 +1,6 @@
 # app/models/kehadiran_murid.py
 from app.extensions import db
-from datetime import date
+from app.utils.timezone_utils import school_today
 
 class KehadiranMurid(db.Model):
     __tablename__ = "kehadiran_murid"
@@ -23,7 +23,7 @@ class KehadiranMurid(db.Model):
     semester = db.Column(db.Enum("ganjil", "genap"), nullable=False, default="ganjil", server_default="ganjil")
     tahun_ajaran = db.Column(db.String(20), nullable=False)
 
-    tanggal = db.Column(db.Date, default=date.today, nullable=False)  # ✅ TAMBAH INI
+    tanggal = db.Column(db.Date, default=school_today, nullable=False)  # ✅ TAMBAH INI
     pertemuan = db.Column(db.Integer, nullable=False)
     status = db.Column(db.String(20), nullable=False)
 
