@@ -897,14 +897,21 @@ def _sinkron_kehadiran_guru_terjadwal(rows):
         # Guard untuk data Alpa lama/stale. Jadwal hari ini yang jam selesainya
         # belum lewat tidak boleh tampil Alpa hanya karena tabel kehadiran_guru
         # masih menyimpan hasil auto-Alpa dari konfigurasi jadwal sebelumnya.
-        # Status dikembalikan ke Belum Absen; saat jam selesai benar-benar lewat,
-        # blok sinkron di bawah akan otomatis mengubahnya kembali menjadi Alpa.
+        #
+        # PENTING:
+        # "Belum Absen" adalah status virtual/realtime untuk response API, BUKAN
+        # nilai yang disimpan ke kolom kehadiran_guru.status. Kolom status DB
+        # hanya menerima status kehadiran yang valid (mis. Hadir/Izin/Sakit/Alpa).
+        # _status_monitoring() sudah mengubah Alpa stale menjadi "Belum Absen"
+        # selama jam_selesai hari ini belum tercapai, jadi status DB tidak perlu
+        # diubah menjadi nilai sementara tersebut.
         if item is not None:
             current = str(item.status or "").strip().lower()
             if current in ["alpa", "alpha", "tidak hadir", "tidak_hadir"] and not jadwal_selesai:
-                item.status = "Belum Absen"
-                item.keterangan = _bersihkan_keterangan_auto_alpa(item.keterangan)
-                changed = True
+                cleaned_keterangan = _bersihkan_keterangan_auto_alpa(item.keterangan)
+                if cleaned_keterangan != item.keterangan:
+                    item.keterangan = cleaned_keterangan
+                    changed = True
 
         if monitor and monitor.jam_masuk:
             desired_status = "Hadir"
