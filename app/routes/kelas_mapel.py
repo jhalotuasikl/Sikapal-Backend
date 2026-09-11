@@ -162,6 +162,39 @@ def add_mapel_with_jadwal():
             "msg": "Kelas sudah selesai/arsip, tidak bisa menambah mapel atau jadwal"
         }), 400
 
+    # Nama mapel harus unik secara PERSIS di dalam satu kelas.
+    # Perbandingan sengaja dilakukan di Python agar case-sensitive:
+    # "NOT BUSY" == "NOT BUSY" ditolak, sedangkan "Not Busy" tetap boleh.
+    mapel_di_kelas = (
+        db.session.query(MataPelajaran)
+        .join(kelas_mapel, kelas_mapel.c.id_mapel == MataPelajaran.id_mapel)
+        .filter(kelas_mapel.c.id_kelas == id_kelas)
+        .all()
+    )
+
+    nama_untuk_validasi = nama_mapel
+    if id_mapel_input:
+        mapel_input = MataPelajaran.query.get(id_mapel_input)
+        if not mapel_input:
+            return jsonify({"msg": "Mata pelajaran tidak ditemukan"}), 404
+        nama_untuk_validasi = str(mapel_input.nama_mapel or "").strip()
+
+    mapel_duplikat = next(
+        (m for m in mapel_di_kelas
+         if str(m.nama_mapel or "").strip() == nama_untuk_validasi),
+        None,
+    )
+    if mapel_duplikat:
+        pesan_duplikat = (
+            f"MATA PELAJARAN DENGAN NAMA '{nama_untuk_validasi}' SUDAH BERADA "
+            "DI KELAS INI, NAMA MATA PELAJARAN TIDAK BOLEH SAMA."
+        )
+        return jsonify({
+            "success": False,
+            "message": pesan_duplikat,
+            "msg": pesan_duplikat,
+        }), 409
+
     jadwal_input = _ambil_jadwal_list(data)
 
     print("JADWAL INPUT:", jadwal_input)
@@ -286,10 +319,17 @@ def add_mapel_with_jadwal():
             if not mapel:
                 return jsonify({"msg": "Mata pelajaran tidak ditemukan"}), 404
         else:
-            mapel = MataPelajaran.query.filter_by(
-                nama_mapel=nama_mapel,
+            # Cari master mapel dengan perbandingan nama case-sensitive.
+            # Hindari filter_by(nama_mapel=...) karena collation database lama
+            # dapat menganggap "NOT BUSY" dan "Not Busy" sebagai nama yang sama.
+            kandidat_mapel = MataPelajaran.query.filter_by(
                 id_tingkat=id_tingkat,
-            ).first()
+            ).all()
+            mapel = next(
+                (m for m in kandidat_mapel
+                 if str(m.nama_mapel or "").strip() == nama_mapel),
+                None,
+            )
 
             if not mapel:
                 mapel = MataPelajaran(

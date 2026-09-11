@@ -1007,6 +1007,27 @@ def detail_hasil_kuisoner_admin(id_kuisoner):
         PertanyaanKuisoner.pertanyaan,
     ).all()
 
+    guru_rows = db.session.query(
+        JadwalGuru,
+        Guru,
+    ).join(
+        Guru, Guru.id_guru == JadwalGuru.id_guru
+    ).filter(
+        JadwalGuru.id_jadwal == kuisoner.id_jadwal
+    ).all()
+    daftar_guru = [
+        {
+            "id_guru": guru.id_guru,
+            "nama_guru": getattr(guru, "nama_guru", None),
+        }
+        for _jadwal_guru, guru in guru_rows
+    ]
+    nama_guru = ", ".join([
+        str(item.get("nama_guru") or "").strip()
+        for item in daftar_guru
+        if str(item.get("nama_guru") or "").strip()
+    ]) or "-"
+
     id_tingkat, tingkat_text = get_tingkat_info(kelas)
     return jsonify({
         "id_kuisoner": kuisoner.id_kuisoner,
@@ -1016,6 +1037,11 @@ def detail_hasil_kuisoner_admin(id_kuisoner):
         "pangkat": tingkat_text,
         "kelas": getattr(kelas, "nama_kelas", None),
         "mapel": getattr(mapel, "nama_mapel", None),
+        "nama_guru": nama_guru,
+        "daftar_guru": daftar_guru,
+        "hari": getattr(jadwal, "hari", None) if jadwal else None,
+        "jam_mulai": str(getattr(jadwal, "jam_mulai", "")) if jadwal else None,
+        "jam_selesai": str(getattr(jadwal, "jam_selesai", "")) if jadwal else None,
         "semester": kuisoner.semester,
         "tahun_ajaran": kuisoner.tahun_ajaran,
         "jumlah_murid": total_murid,

@@ -254,6 +254,28 @@ def nilai_payload(nilai, murid, jadwal, kelas, mapel, guru=None):
     }
 
 
+def _dedupe_nilai_group_rows(rows):
+    """
+    Menghilangkan duplikat pembacaan nilai dalam satu kelompok mapel J1/J2/J3.
+
+    Data lama mungkin pernah tersimpan lebih dari sekali pada jadwal berbeda
+    untuk mapel yang sama. Endpoint tetap tidak menghapus riwayat database,
+    tetapi hanya mengirim satu nilai logis terbaru per murid/semester/tahun.
+    """
+    unique = {}
+    for row in rows:
+        nilai = row[0]
+        key = (
+            nilai.id_murid,
+            normalisasi_semester(nilai.semester),
+            nilai.tahun_ajaran,
+        )
+        previous = unique.get(key)
+        if previous is None or (nilai.id_nilai or 0) > (previous[0].id_nilai or 0):
+            unique[key] = row
+    return list(unique.values())
+
+
 # =====================================================
 # ✅ INPUT NILAI (BERDASARKAN JADWAL)
 # =====================================================
@@ -726,6 +748,7 @@ def get_nilai_by_jadwal_guru(id_jadwal):
         .order_by(Murid.nama_murid.asc(), Nilai.semester.asc())
         .all()
     )
+    data = _dedupe_nilai_group_rows(data)
 
     return jsonify([
         nilai_payload(n, mur, j, k, m, g)
@@ -772,7 +795,27 @@ def kirim_semua_nilai_jadwal_ke_admin(id_jadwal):
     nilai_list = nilai_query.all()
 
     if not nilai_list:
-        return jsonify({"message": "Belum ada nilai pada jadwal dan semester-tahun ajaran ini"}), 404
+        return jsonify({
+            "message": "Mata pelajaran belum memiliki data nilai siswa/siswi",
+            "id_jadwal": id_jadwal,
+            "id_mapel": jadwal.id_mapel,
+            "jumlah": 0,
+            "has_data": False,
+            "id_tingkat": jadwal.kelas.id_tingkat if jadwal.kelas else None,
+            "tingkat": tingkat_text(jadwal.kelas) if jadwal.kelas else "-",
+        }), 200
+
+    # Satu mata pelajaran dapat memiliki 1-3 jadwal mingguan. Nilai tetap satu
+    # data logis per murid/semester/tahun ajaran, sehingga jumlah yang
+    # dilaporkan ke frontend tidak boleh berlipat sesuai jumlah jadwal.
+    logical_keys = {
+        (
+            n.id_murid,
+            normalisasi_semester(n.semester),
+            n.tahun_ajaran,
+        )
+        for n in nilai_list
+    }
 
     for n in nilai_list:
         n.status_kirim = True
@@ -780,9 +823,12 @@ def kirim_semua_nilai_jadwal_ke_admin(id_jadwal):
     db.session.commit()
 
     return jsonify({
-        "message": "Semua nilai pada jadwal berhasil dikirim ke admin",
+        "message": "Nilai mata pelajaran berhasil dikirim ke admin",
         "id_jadwal": id_jadwal,
-        "jumlah": len(nilai_list),
+        "id_mapel": jadwal.id_mapel,
+        "jumlah": len(logical_keys),
+        "has_data": True,
+        "jumlah_jadwal_kelompok": len(jadwal_satu_kelompok),
         "id_tingkat": jadwal.kelas.id_tingkat if jadwal.kelas else None,
         "tingkat": tingkat_text(jadwal.kelas) if jadwal.kelas else "-",
     }), 200
@@ -827,6 +873,7 @@ def admin_nilai_by_jadwal(id_jadwal):
     data = _filter_semester_tahun(data)
 
     data = data.order_by(Murid.nama_murid.asc(), Nilai.semester.asc()).all()
+    data = _dedupe_nilai_group_rows(data)
 
     return jsonify([
         nilai_payload(n, mur, j, k, m, g)

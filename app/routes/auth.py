@@ -846,3 +846,68 @@ def upload_photo():
         return jsonify({
             "message": f"Gagal upload foto: {str(e)}",
         }), 500
+
+# =====================================================
+# DELETE PROFILE PHOTO
+# =====================================================
+@auth_bp.route("/profile-photo", methods=["DELETE"])
+@jwt_required()
+def delete_profile_photo():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"message": "User tidak ditemukan"}), 404
+
+    role_name = _get_user_role(user)
+    if not role_name:
+        return jsonify({"message": "Role tidak valid"}), 500
+
+    target_user = user
+    if role_name == "orang_tua":
+        orang_tua = OrangTua.query.filter_by(id_user=user.id_user).first()
+        if not orang_tua:
+            return jsonify({"message": "Data orang tua rusak"}), 500
+
+        murid = Murid.query.get(orang_tua.id_murid)
+        if not murid:
+            return jsonify({"message": "Data anak orang tua rusak"}), 500
+
+        user_murid = User.query.get(murid.id_user)
+        if not user_murid:
+            return jsonify({"message": "Akun murid tidak ditemukan"}), 500
+        target_user = user_murid
+
+    upload_folder = os.path.join(
+        current_app.root_path,
+        "static",
+        "profile_photos",
+    )
+
+    try:
+        old_value = (target_user.foto_profil or "").strip()
+        if old_value:
+            old_filename = os.path.basename(old_value)
+            old_path = os.path.join(upload_folder, old_filename)
+            if os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    # Database tetap dibersihkan meskipun file fisik sudah
+                    # tidak ada/tidak bisa dihapus agar avatar default aktif.
+                    pass
+
+        target_user.foto_profil = None
+        db.session.commit()
+
+        return jsonify({
+            "message": "Foto profil berhasil dihapus",
+            "foto_profil": "",
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({
+            "message": f"Gagal menghapus foto profil: {str(e)}",
+        }), 500
+

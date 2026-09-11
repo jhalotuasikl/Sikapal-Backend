@@ -109,6 +109,7 @@ def tambah_periode():
             tanggal_mulai=tanggal_mulai,
             tanggal_selesai=tanggal_selesai,
             status=status,
+            pernah_aktif=(status == "aktif"),
         )
         db.session.add(row)
         db.session.commit()
@@ -167,6 +168,8 @@ def ubah_periode(id_periode):
         row.tanggal_mulai = tanggal_mulai
         row.tanggal_selesai = tanggal_selesai
         row.status = status
+        if status == "aktif":
+            row.pernah_aktif = True
         db.session.commit()
 
         return jsonify({
@@ -177,6 +180,43 @@ def ubah_periode(id_periode):
     except Exception as e:
         db.session.rollback()
         return jsonify({"success": False, "message": f"Gagal mengubah periode: {str(e)}"}), 500
+
+
+@periode_akademik_bp.route("/admin/periode/<int:id_periode>", methods=["DELETE"])
+@jwt_required()
+def hapus_periode(id_periode):
+    if not _is_admin():
+        return jsonify({"message": "Akses khusus admin"}), 403
+
+    row = PeriodeAkademik.query.get_or_404(id_periode)
+
+    if str(row.status or "").lower() == "aktif":
+        return jsonify({
+            "success": False,
+            "message": "Periode aktif tidak dapat dihapus. Aktifkan periode lain terlebih dahulu.",
+        }), 409
+
+    if bool(getattr(row, "pernah_aktif", False)):
+        return jsonify({
+            "success": False,
+            "message": "Periode yang sudah pernah aktif tidak dapat dihapus karena dipertahankan sebagai riwayat akademik.",
+        }), 409
+
+    label = f"Semester {'Ganjil' if row.semester == 'ganjil' else 'Genap'} • TA {row.tahun_ajaran}"
+
+    try:
+        db.session.delete(row)
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "message": f"Periode {label} berhasil dihapus",
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({
+            "success": False,
+            "message": f"Gagal menghapus periode: {str(e)}",
+        }), 500
 
 
 @periode_akademik_bp.route("/admin/periode/<int:id_periode>/aktifkan", methods=["PUT"])
@@ -190,6 +230,7 @@ def aktifkan_periode(id_periode):
     try:
         PeriodeAkademik.query.filter(PeriodeAkademik.id_periode != id_periode).update({"status": "selesai"})
         row.status = "aktif"
+        row.pernah_aktif = True
         db.session.commit()
 
         return jsonify({

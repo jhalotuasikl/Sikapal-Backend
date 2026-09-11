@@ -8,6 +8,7 @@ import re
 
 from flask_jwt_extended import jwt_required, get_jwt
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from werkzeug.utils import secure_filename
 from app.extensions import db
 
@@ -31,6 +32,9 @@ _LATE_REPORT_MARKER = "Alasan keterlambatan laporan & keluar:"
 _LATE_ENTRY_MARKER = "Terlambat Masuk:"
 _LATE_ENTRY_TOLERANCE_MINUTES = 15
 _LATE_EXIT_TOLERANCE_MINUTES = 10
+_LOCATION_MASUK_MARKER = "Lokasi Masuk:"
+_LOCATION_KELUAR_MARKER = "Lokasi Keluar & Laporan:"
+_LOCATION_PENGAJUAN_MARKER = "Lokasi Izin/Sakit:"
 
 
 def _late_report_reason(value):
@@ -158,6 +162,36 @@ def _now_app_naive():
 
 def _today_app():
     return school_today()
+
+
+def _location_label(source):
+    source = source or {}
+    try:
+        latitude = float(source.get("latitude"))
+        longitude = float(source.get("longitude"))
+    except (TypeError, ValueError):
+        return None
+
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return None
+
+    label = str(source.get("location_label") or "").strip()
+    if not label:
+        label = f"Lat {latitude:.6f} • Long {longitude:.6f}"
+    return label[:120]
+
+
+def _location_from_keterangan(value, marker):
+    text = str(value or "")
+    if not text:
+        return None
+    marker_lower = marker.lower()
+    for part in text.split(";"):
+        clean = part.strip()
+        if clean.lower().startswith(marker_lower):
+            result = clean[len(marker):].strip()
+            return result or None
+    return None
 
 
 # =====================================================
@@ -820,6 +854,18 @@ def _monitoring_payload(jadwal, kelas, mapel, guru, monitor=None, laporan=None, 
         "jam_jadwal_selesai": _fmt_jadwal_time(jadwal.jam_selesai),
         "masuk": masuk,
         "keluar": keluar,
+        "lokasi_masuk": _location_from_keterangan(
+            getattr(kehadiran_guru, "keterangan", None),
+            _LOCATION_MASUK_MARKER,
+        ) if kehadiran_guru else None,
+        "lokasi_keluar": _location_from_keterangan(
+            getattr(kehadiran_guru, "keterangan", None),
+            _LOCATION_KELUAR_MARKER,
+        ) if kehadiran_guru else None,
+        "lokasi_pengajuan": _location_from_keterangan(
+            getattr(kehadiran_guru, "keterangan", None),
+            _LOCATION_PENGAJUAN_MARKER,
+        ) if kehadiran_guru else None,
         "status": status,
         # Status utama tetap Hadir/Selesai. Keterlambatan menjadi metadata
         # tambahan agar admin dapat membedakan terlambat masuk vs keluar.
@@ -1075,6 +1121,9 @@ def absen_masuk():
 
     data = request.json or {}
     id_jadwal = data.get("id_jadwal")
+    lokasi_masuk = _location_label(data)
+    if lokasi_masuk is None:
+        return jsonify({"message": "Lokasi saat menekan Masuk wajib tersedia"}), 400
     if not id_jadwal:
         return jsonify({"message": "id_jadwal wajib"}), 400
 
@@ -1139,7 +1188,8 @@ def absen_masuk():
     db.session.add(monitor)
 
     keterangan_masuk = (
-        f"Masuk {now_time.strftime('%H:%M:%S')} - {_jadwal_label(id_jadwal)}"
+        f"Masuk {now_time.strftime('%H:%M:%S')} - {_jadwal_label(id_jadwal)}; "
+        f"{_LOCATION_MASUK_MARKER} {lokasi_masuk}"
     )
     if terlambat_masuk_menit > 0:
         keterangan_masuk = (
@@ -1155,7 +1205,70 @@ def absen_masuk():
         keterangan=keterangan_masuk
     )
 
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError as exc:
+        # Double tap / request paralel dapat sama-sama lolos pengecekan awal.
+        # Hanya duplicate pada unique per guru+jadwal+tanggal yang ditangani;
+        # IntegrityError lain tetap diteruskan agar tidak menutupi error database.
+        duplicate_kehadiran = (
+            "Duplicate entry" in str(getattr(exc, "orig", exc))
+            and "uq_kehadiran_guru_per_jadwal" in str(getattr(exc, "orig", exc))
+        )
+        db.session.rollback()
+        if not duplicate_kehadiran:
+            raise
+
+        existing_monitor = LaporanMonitoring.query.filter_by(
+            id_jadwal=id_jadwal,
+            tanggal=today,
+        ).first()
+        if existing_monitor:
+            return jsonify({
+                "message": "Sudah absen",
+                "id_monitor": existing_monitor.id_monitor,
+            }), 409
+
+        existing_kehadiran = _get_kehadiran_guru(id_guru, today, id_jadwal)
+        if existing_kehadiran is None:
+            return jsonify({
+                "message": "Kehadiran sedang diproses. Silakan muat ulang status."
+            }), 409
+
+        retry_monitor = LaporanMonitoring(
+            id_jadwal=id_jadwal,
+            tanggal=today,
+            jam_masuk=now_time,
+            status="Hadir",
+        )
+        db.session.add(retry_monitor)
+        _upsert_kehadiran_guru(
+            id_guru=id_guru,
+            tanggal=today,
+            id_jadwal=id_jadwal,
+            status="Hadir",
+            keterangan=keterangan_masuk,
+        )
+
+        try:
+            db.session.commit()
+            monitor = retry_monitor
+        except IntegrityError as retry_exc:
+            duplicate_retry = (
+                "Duplicate entry" in str(getattr(retry_exc, "orig", retry_exc))
+                and "uq_kehadiran_guru_per_jadwal" in str(getattr(retry_exc, "orig", retry_exc))
+            )
+            db.session.rollback()
+            if not duplicate_retry:
+                raise
+            existing_monitor = LaporanMonitoring.query.filter_by(
+                id_jadwal=id_jadwal,
+                tanggal=today,
+            ).first()
+            return jsonify({
+                "message": "Sudah absen" if existing_monitor else "Kehadiran sedang diproses. Silakan muat ulang status.",
+                "id_monitor": existing_monitor.id_monitor if existing_monitor else None,
+            }), 409
 
     return jsonify({
         "message": "Absen masuk berhasil",
@@ -1163,6 +1276,7 @@ def absen_masuk():
         "status": "Hadir",
         "terlambat_masuk": terlambat_masuk_menit > 0,
         "terlambat_masuk_menit": terlambat_masuk_menit,
+        "lokasi_masuk": lokasi_masuk,
         "status_tambahan": (
             ["Terlambat Masuk"] if terlambat_masuk_menit > 0 else []
         ),
@@ -1185,6 +1299,10 @@ def pengajuan_kehadiran_guru():
     status = request.form.get("status") or payload_json.get("status")
     alasan = request.form.get("alasan") or payload_json.get("alasan")
     instruksi = request.form.get("instruksi") or payload_json.get("instruksi")
+    lokasi_source = request.form if request.form else payload_json
+    lokasi_pengajuan = _location_label(lokasi_source)
+    if lokasi_pengajuan is None:
+        return jsonify({"message": "Lokasi saat menekan Izin/Sakit wajib tersedia"}), 400
 
     try:
         id_jadwal = int(id_jadwal)
@@ -1231,7 +1349,8 @@ def pengajuan_kehadiran_guru():
         status=status_text,
         keterangan=(
             f"Pengajuan {status_text} dikirim {waktu_pengajuan} - "
-            f"{_jadwal_label(id_jadwal)}"
+            f"{_jadwal_label(id_jadwal)}; "
+            f"{_LOCATION_PENGAJUAN_MARKER} {lokasi_pengajuan}"
         ),
         alasan=alasan_text,
         instruksi=instruksi_text,
@@ -1251,6 +1370,7 @@ def pengajuan_kehadiran_guru():
         "bukti_url": _bukti_url(item.bukti),
         "status_pengajuan": item.status_pengajuan,
         "waktu_pengajuan": waktu_pengajuan,
+        "lokasi_pengajuan": lokasi_pengajuan,
         "keterangan": item.keterangan,
     }), 201
 
@@ -1477,6 +1597,9 @@ def absen_keluar():
 
     data = request.json or {}
     id_monitor = data.get("id_monitor")
+    lokasi_keluar = _location_label(data)
+    if lokasi_keluar is None:
+        return jsonify({"message": "Lokasi saat menekan Keluar & Laporan wajib tersedia"}), 400
     if not id_monitor:
         return jsonify({"message": "id_monitor wajib"}), 400
 
@@ -1525,12 +1648,18 @@ def absen_keluar():
         tanggal=monitor.tanggal,
         id_jadwal=monitor.id_jadwal,
         status="Hadir",
-        keterangan=f"Keluar {now_time.strftime('%H:%M:%S')} - {_jadwal_label(monitor.id_jadwal)}"
+        keterangan=(
+            f"Keluar {now_time.strftime('%H:%M:%S')} - {_jadwal_label(monitor.id_jadwal)}; "
+            f"{_LOCATION_KELUAR_MARKER} {lokasi_keluar}"
+        )
     )
 
     db.session.commit()
 
-    return jsonify({"message": "Absen keluar berhasil"}), 200
+    return jsonify({
+        "message": "Absen keluar berhasil",
+        "lokasi_keluar": lokasi_keluar,
+    }), 200
 
 
 # =====================================================
@@ -1593,6 +1722,18 @@ def status_absen(id_jadwal):
             ) if kehadiran_guru else None,
             "jam_masuk": None,
             "jam_keluar": None,
+            "lokasi_masuk": _location_from_keterangan(
+                getattr(kehadiran_guru, "keterangan", None),
+                _LOCATION_MASUK_MARKER,
+            ) if kehadiran_guru else None,
+            "lokasi_keluar": _location_from_keterangan(
+                getattr(kehadiran_guru, "keterangan", None),
+                _LOCATION_KELUAR_MARKER,
+            ) if kehadiran_guru else None,
+            "lokasi_pengajuan": _location_from_keterangan(
+                getattr(kehadiran_guru, "keterangan", None),
+                _LOCATION_PENGAJUAN_MARKER,
+            ) if kehadiran_guru else None,
             "terlambat_masuk": False,
             "terlambat_masuk_menit": 0,
             "status_terlambat_masuk": None,
@@ -1649,6 +1790,18 @@ def status_absen(id_jadwal):
         ) if kehadiran_guru else None,
         "jam_masuk": _fmt_time(data.jam_masuk),
         "jam_keluar": _fmt_time(data.jam_keluar),
+        "lokasi_masuk": _location_from_keterangan(
+            getattr(kehadiran_guru, "keterangan", None),
+            _LOCATION_MASUK_MARKER,
+        ) if kehadiran_guru else None,
+        "lokasi_keluar": _location_from_keterangan(
+            getattr(kehadiran_guru, "keterangan", None),
+            _LOCATION_KELUAR_MARKER,
+        ) if kehadiran_guru else None,
+        "lokasi_pengajuan": _location_from_keterangan(
+            getattr(kehadiran_guru, "keterangan", None),
+            _LOCATION_PENGAJUAN_MARKER,
+        ) if kehadiran_guru else None,
         "terlambat_masuk": terlambat_masuk,
         "terlambat_masuk_menit": terlambat_masuk_menit,
         "status_terlambat_masuk": "Terlambat Masuk" if terlambat_masuk else None,
@@ -1715,7 +1868,7 @@ def proses_pengajuan_kehadiran_guru(id_kehadiran):
 
 
 # =====================================================
-# RIWAYAT MONITORING GURU (MAKSIMAL 1 MINGGU)
+# RIWAYAT MONITORING GURU (MAKSIMAL 2 MINGGU)
 # =====================================================
 @monitoring_bp.route("/guru/monitoring", methods=["GET"])
 @jwt_required()
@@ -1733,7 +1886,7 @@ def monitoring_guru():
         return jsonify({"message": "id_guru tidak ada di token"}), 400
 
     today = _today_app()
-    cutoff = today - timedelta(days=7)
+    cutoff = today - timedelta(days=14)
 
     # Kehadiran/status tetap memakai tanggal aslinya, sedangkan kelas, mapel,
     # hari, dan jam selalu diambil dari tabel jadwal TERBARU. Karena query
