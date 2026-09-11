@@ -46,6 +46,22 @@ def _column_nullable(db, table: str, column: str) -> bool:
     except Exception:
         return False
 
+
+def _column_collation(db, table: str, column: str) -> str:
+    try:
+        sql = text("""
+            SELECT COLLATION_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = :t
+              AND COLUMN_NAME = :c
+            LIMIT 1
+        """)
+        return str(db.session.execute(sql, {"t": table, "c": column}).scalar() or "")
+    except Exception:
+        return ""
+
+
 def ensure_schema(db):
     """Auto-fix schema kecil supaya backend tidak crash saat kolom belum ada."""
     try:
@@ -56,6 +72,44 @@ def ensure_schema(db):
                 ADD COLUMN status_kirim TINYINT(1) NOT NULL DEFAULT 0
             """))
             db.session.commit()
+
+        # Mata pelajaran perlu perbandingan nama case-sensitive.
+        # Ini membuat "NOT BUSY" berbeda dari "Not Busy", sementara nama
+        # yang sama persis tetap dilindungi unique constraint.
+        try:
+            mapel_collation = _column_collation(
+                db, "mata_pelajaran", "nama_mapel"
+            ).lower()
+            if mapel_collation and mapel_collation != "utf8mb4_bin":
+                db.session.execute(text("""
+                    ALTER TABLE mata_pelajaran
+                    MODIFY COLUMN nama_mapel VARCHAR(100)
+                    CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL
+                """))
+                db.session.commit()
+        except Exception:
+            # Jangan menggagalkan migrasi schema lain jika server database lama
+            # tidak mendukung perubahan collation otomatis.
+            db.session.rollback()
+
+        # periode_akademik.pernah_aktif membedakan draft yang belum pernah
+        # diaktifkan dari periode riwayat. Baris lama diamankan sebagai pernah
+        # aktif agar data historis tidak dapat terhapus karena migrasi.
+        try:
+            if not _column_exists(db, "periode_akademik", "pernah_aktif"):
+                db.session.execute(text("""
+                    ALTER TABLE periode_akademik
+                    ADD COLUMN pernah_aktif TINYINT(1) NOT NULL DEFAULT 1
+                    AFTER status
+                """))
+                db.session.commit()
+                db.session.execute(text("""
+                    ALTER TABLE periode_akademik
+                    MODIFY COLUMN pernah_aktif TINYINT(1) NOT NULL DEFAULT 0
+                """))
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
 
         # kehadiran_guru.instruksi (instruksi saat guru izin/sakit)
         if not _column_exists(db, "kehadiran_guru", "instruksi"):
