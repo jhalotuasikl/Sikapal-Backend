@@ -7,7 +7,9 @@ class MataPelajaran(db.Model):
     id_mapel = db.Column(db.Integer, primary_key=True)
 
     # ❌ jangan unique=True di sini
-    nama_mapel = db.Column(db.String(100), nullable=False)
+    # Nama mapel dibandingkan case-sensitive agar variasi kapitalisasi
+    # (mis. NOT BUSY dan Not Busy) dapat menjadi data berbeda.
+    nama_mapel = db.Column(db.String(100, collation="utf8mb4_bin"), nullable=False)
 
     id_tingkat = db.Column(db.Integer, db.ForeignKey("tingkat.id_tingkat"), nullable=False)
 

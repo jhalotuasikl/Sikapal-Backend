@@ -16,6 +16,14 @@ class PeriodeAkademik(db.Model):
         default="selesai",
         server_default="selesai",
     )
+    # Menandai apakah periode pernah menjadi periode aktif. Periode yang sudah
+    # pernah aktif dipertahankan sebagai riwayat dan tidak boleh dihapus.
+    pernah_aktif = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
 
     created_at = db.Column(db.DateTime, server_default=db.func.current_timestamp())
     updated_at = db.Column(
@@ -37,5 +45,6 @@ class PeriodeAkademik(db.Model):
             "tanggal_mulai": self.tanggal_mulai.isoformat() if self.tanggal_mulai else None,
             "tanggal_selesai": self.tanggal_selesai.isoformat() if self.tanggal_selesai else None,
             "status": self.status,
+            "pernah_aktif": bool(self.pernah_aktif),
             "label": f"Semester {'Ganjil' if self.semester == 'ganjil' else 'Genap'} • TA {self.tahun_ajaran}",
         }
